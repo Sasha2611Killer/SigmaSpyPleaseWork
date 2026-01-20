@@ -105,7 +105,7 @@ function Ui:Init(Data)
 	Files = Modules.Files
 
 	--// ReGui
-    ReGui = loadstring(game:HttpGet(`{Data.Configuration.RepoUrl}/lib/ReGui.lua`), "ReGui")()
+    ReGui = loadstring(game:HttpGet(`{Data.Configuration.RepoUrl}/ReGui.lua`), "ReGui")()
 	self:LoadFont()
 	self:LoadReGui()
 	self:CheckScale()

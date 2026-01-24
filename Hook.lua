@@ -402,57 +402,27 @@ function Hook:LoadMetaHooks(ActorCode: string, ChannelId: number)
 end
 
 function Hook:LoadReceiveHooks()
-	local NoReceiveHooking = Config.NoReceiveHooking
-	local BlackListedServices = Config.BlackListedServices or {}
+	if Config.NoReceiveHooking then return end
 
-	if NoReceiveHooking then return end
+	local targetServices = {
+		game:GetService("ReplicatedStorage"),
+		game:GetService("ReplicatedFirst"),
+		game:GetService("Players").LocalPlayer
+	}
 
-	-- 1. ФУНКЦИЯ ДЛЯ ПЕРЕХВАТА ВСЕХ REMOTES В ДЕРЕВЕ
-	local function hookAllRemotes(parent)
-		if not parent then return end
-
-		-- Перехватываем все дочерние объекты
-		for _, descendant in ipairs(parent:GetDescendants()) do
-			self:ConnectClientRecive(descendant)
-		end
-
-		-- Рекурсивно проверяем сервисы
-		for _, service in ipairs(parent:GetChildren()) do
-			if not BlackListedServices[service.ClassName] then
-				hookAllRemotes(service)
+	-- Быстрый перехват существующих
+	for _, service in ipairs(targetServices) do
+		if service then
+			for _, descendant in ipairs(service:GetDescendants()) do
+				self:ConnectClientRecive(descendant)
 			end
 		end
 	end
 
-	-- 2. ПЕРЕХВАТ ВСЕХ СУЩЕСТВУЮЩИХ REMOTES СРАЗУ
-	print("[SigmaSpy] Начинаю перехват существующих remotes...")
-	hookAllRemotes(game)
-
-	-- 3. ПЕРЕХВАТ ОБЪЕКТОВ БЕЗ РОДИТЕЛЯ
-	self:MultiConnect(getnilinstances())
-
-	-- 4. ПЕРЕХВАТ ВАЖНЫХ МЕСТ С ВЫСОКИМ ПРИОРИТЕТОМ
-	local priorityPlaces = {
-		game:GetService("ReplicatedStorage"),
-		game:GetService("ReplicatedFirst"),
-		game:GetService("Players").LocalPlayer:WaitForChild("PlayerScripts"),
-		game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui"),
-		game:GetService("Workspace")
-	}
-
-	for _, place in ipairs(priorityPlaces) do
-		if place then
-			self:MultiConnect(place:GetDescendants())
-		end
-	end
-
-	-- 5. ПЕРЕХВАТ НОВЫХ REMOTES (КАК БЫЛО)
-	game.DescendantAdded:Connect(function(Remote)
-		task.wait(0.1) -- Небольшая задержка для стабильности
-		self:ConnectClientRecive(Remote)
+	-- ТОЛЬКО ДЛЯ НОВЫХ
+	game.DescendantAdded:Connect(function(inst)
+		self:ConnectClientRecive(inst)
 	end)
-
-	print("[SigmaSpy] Все remotes перехвачены!")
 end
 
 function Hook:LoadHooks(ActorCode: string, ChannelId: number)

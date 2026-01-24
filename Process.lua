@@ -297,7 +297,7 @@ function Process:IsProtectedRemote(Remote: Instance): boolean
 end
 
 function Process:RemoteAllowed(Remote: Event, TransferType: string, Method: string?): boolean?
-    -- ИСПРАВЛЕНИЕ: убрана проверка InstanceCreatedRemotes[Remote]
+    -- ИСПРАВЛЕНО: убрана проверка InstanceCreatedRemotes[Remote]
     if typeof(Remote) ~= 'Instance' then return end
 
     --// Check if the Remote is protected
@@ -506,17 +506,9 @@ local ProcessCallback = newcclosure(function(Data: RemoteData, Remote, ...): tab
     local Id = Data.Id
     local Method = Data.Method
 
-    -- ДОБАВЛЕНА ОТЛАДКА ДЛЯ ПРОВЕРКИ
-    print("[SigmaSpy] ProcessCallback: ", Method, "ID:", Id)
-
     --// Check if the Remote is Blocked
     local RemoteData = Process:GetRemoteData(Id)
-    print("[SigmaSpy] RemoteData:", RemoteData, "Blocked:", RemoteData and RemoteData.Blocked)
-    
-    if RemoteData.Blocked then 
-        print("[SigmaSpy] ВЫЗОВ ЗАБЛОКИРОВАН!")
-        return {} 
-    end
+    if RemoteData.Blocked then return {} end
 
     --// Check for a spoof
     local Spoof = Process:GetRemoteSpoof(Remote, Method, OriginalFunc, ...)
@@ -538,10 +530,7 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     local IsReceive = Data.IsReceive
 
 	--// Check if the transfertype method is allowed
-	if TransferType and not self:RemoteAllowed(Remote, TransferType, Method) then 
-        print("[SigmaSpy] RemoteAllowed вернул false для:", Method)
-        return 
-    end
+	if TransferType and not self:RemoteAllowed(Remote, TransferType, Method) then return end
 
     --// Fetch details
     local Id = Communication:GetDebugId(Remote)

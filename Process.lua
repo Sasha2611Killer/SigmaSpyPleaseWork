@@ -174,13 +174,13 @@ end
 function Process:CheckValue(Value, Ignore: table?, Cache: table?)
     local Type = typeof(Value)
     Communication:WaitCheck()
-    
+
     if Type == "table" then
         Value = self:DeepCloneTable(Value, Ignore, Cache)
     elseif Type == "Instance" then
         Value = cloneref(Value)
     end
-    
+
     return Value
 end
 
@@ -199,7 +199,7 @@ function Process:DeepCloneTable(Table, Ignore: table?, Visited: table?): table
     for Key, Value in next, Table do
         --// Check if the value is ignored
         if Ignore and table.find(Ignore, Value) then continue end
-        
+
         Key = self:CheckValue(Key, Ignore, Cache)
         New[Key] = self:CheckValue(Value, Ignore, Cache)
     end
@@ -208,7 +208,7 @@ function Process:DeepCloneTable(Table, Ignore: table?, Visited: table?): table
     if not Visited then
         table.clear(Cache)
     end
-    
+
     return New
 end
 
@@ -297,8 +297,9 @@ function Process:IsProtectedRemote(Remote: Instance): boolean
 end
 
 function Process:RemoteAllowed(Remote: Event, TransferType: string, Method: string?): boolean?
-    if typeof(Remote) ~= 'Instance' or InstanceCreatedRemotes[Remote] then return end
-    
+    -- ИСПРАВЛЕНИЕ: убрана проверка InstanceCreatedRemotes[Remote]
+    if typeof(Remote) ~= 'Instance' then return end
+
     --// Check if the Remote is protected
     if self:IsProtectedRemote(Remote) then return end
 
@@ -379,7 +380,7 @@ function Process:Decompile(Script: LocalScript | ModuleScript): string
         Error ..= `\n--[[\n{Bytecode}\n]]`
         return Error, true
     end
-    
+
     --// Send POST request to the API
     local Responce = request({
         Url = KonstantAPI,
@@ -405,7 +406,7 @@ function Process:GetScriptFromFunc(Func: (...any) -> ...any)
 
     local Success, ENV = pcall(getfenv, Func)
     if not Success then return end
-    
+
     --// Blacklist sigma spy
     if self:IsSigmaSpyENV(ENV) then return end
 
@@ -466,7 +467,7 @@ function Process:GetRemoteData(Id: string)
     --// Check for existing remote data
 	local Existing = RemoteOptions[Id]
 	if Existing then return Existing end
-	
+
     --// Base remote data
 	local Data = {
 		Excluded = false,
@@ -505,9 +506,17 @@ local ProcessCallback = newcclosure(function(Data: RemoteData, Remote, ...): tab
     local Id = Data.Id
     local Method = Data.Method
 
+    -- ДОБАВЛЕНА ОТЛАДКА ДЛЯ ПРОВЕРКИ
+    print("[SigmaSpy] ProcessCallback: ", Method, "ID:", Id)
+
     --// Check if the Remote is Blocked
     local RemoteData = Process:GetRemoteData(Id)
-    if RemoteData.Blocked then return {} end
+    print("[SigmaSpy] RemoteData:", RemoteData, "Blocked:", RemoteData and RemoteData.Blocked)
+    
+    if RemoteData.Blocked then 
+        print("[SigmaSpy] ВЫЗОВ ЗАБЛОКИРОВАН!")
+        return {} 
+    end
 
     --// Check for a spoof
     local Spoof = Process:GetRemoteSpoof(Remote, Method, OriginalFunc, ...)
@@ -529,7 +538,10 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     local IsReceive = Data.IsReceive
 
 	--// Check if the transfertype method is allowed
-	if TransferType and not self:RemoteAllowed(Remote, TransferType, Method) then return end
+	if TransferType and not self:RemoteAllowed(Remote, TransferType, Method) then 
+        print("[SigmaSpy] RemoteAllowed вернул false для:", Method)
+        return 
+    end
 
     --// Fetch details
     local Id = Communication:GetDebugId(Remote)

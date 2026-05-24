@@ -1,6 +1,6 @@
 --!nocheck
 --!nolint
-local a a={cache={},load=function(b)if not a.cache[b]then a.cache[b]={c=a[b]()}
+local a = {cache = {}},load=function(b)if not a.cache[b]then a.cache[b]={c=a[b]()}
 end return a.cache[b].c end}do function a.a()local b,c,d='8.0',cloneref or
 function(b)return b end,{Theme={Syntax={Text=Color3.fromRGB(204,204,204),
 Background=Color3.fromRGB(20,20,20),Selection=Color3.fromRGB(255,255,255),
@@ -700,83 +700,47 @@ Text=`Hello {B},{z}`}end end local z=u:TreeNode{Title='With headers'}local A,B=z
 :Table{Border=true,RowBackground=true,MaxColumns=3},{'One','Two','Three'}for C=1
 ,7 do if C==1 then p=A:HeaderRow()else p=A:Row()end for D,E in B do if C==1 then
 local F=p:Column()F:Label{Text=E}continue end local F=p:NextColumn()F:Label{Text
-=`Hello {D},{C}`}end end end end function a.f()return{Dot='rbxasset://textures/whiteCircle.png',
-Arrow = 'rbxasset://textures/ui/AvatarContextMenu_Arrow.png',
-Close = 'rbxasset://textures/loading/cancelButton.png',
-Checkmark = 'rbxasset://textures/ui/Lobby/Buttons/nine_slice_button.png',
-    Cat = 'rbxassetid://6319951718',
-    Script = 'rbxassetid://6319951718',
-    Settings = 'rbxassetid://6319951718',
-    Info = 'rbxassetid://6319951718',
-    Move = 'rbxassetid://6319951718',
-    Roblox = 'rbxassetid://6319951718',
-    Warning = 'rbxassetid://6319951718',
-    Audio = 'rbxassetid://6319951718',
-    Shop = 'rbxassetid://6319951718',
-    CharacterDance = 'rbxassetid://6319951718',
-    Pants = 'rbxassetid://6319951718',
-    Home = 'rbxassetid://6319951718',
-    Robux = 'rbxassetid://6319951718',
-    Badge = 'rbxassetid://6319951718',
-    SpawnLocation = 'rbxassetid://6319951718',
-    Sword = 'rbxassetid://6319951718',
-    Clover = 'rbxassetid://6319951718',
-    Star = 'rbxassetid://6319951718',
-    Code = 'rbxassetid://6319951718',
-    Paw = 'rbxassetid://6319951718',
-    Shield = 'rbxassetid://6319951718',
-    Shield2 = 'rbxassetid://6319951718',
-    File = 'rbxassetid://6319951718',
-    Book = 'rbxassetid://6319951718',
-    Location = 'rbxassetid://6319951718',
-    Puzzle = 'rbxassetid://6319951718',
-    Discord = 'rbxassetid://6319951718',
-    Premium = 'rbxassetid://6319951718',
-    Friend = 'rbxassetid://6319951718',
-    User = 'rbxassetid://6319951718',
-    Duplicate = 'rbxassetid://6319951718',
-    ChatBox = 'rbxassetid://6319951718',
-    ChatBox2 = 'rbxassetid://6319951718',
-    Devices = 'rbxassetid://6319951718',
-    Weight = 'rbxassetid://6319951718',
-    Image = 'rbxassetid://6319951718',
-    Profile = 'rbxassetid://6319951718',
-    Admin = 'rbxassetid://6319951718',
-    PaintBrush = 'rbxassetid://6319951718',
-    Speed = 'rbxassetid://6319951718',
-    NoConnection = 'rbxassetid://6319951718',
-    Connection = 'rbxassetid://6319951718',
-    Globe = 'rbxassetid://6319951718',
-    Box = 'rbxassetid://6319951718',
-    Crown = 'rbxassetid://6319951718',
-    Control = 'rbxassetid://6319951718',
-    Send = 'rbxassetid://6319951718',
-    FastForward = 'rbxassetid://6319951718',
-    Pause = 'rbxassetid://6319951718',
-    Reload = 'rbxassetid://6319951718',
-    Joystick = 'rbxassetid://6319951718',
-    Controller = 'rbxassetid://6319951718',
-    Lock = 'rbxassetid://6319951718',
-    Calculator = 'rbxassetid://6319951718',
-    Sun = 'rbxassetid://6319951718',
-    Moon = 'rbxassetid://6319951718',
-    Prohibited = 'rbxassetid://6319951718',
-    Flag = 'rbxassetid://6319951718',
-    Website = 'rbxassetid://6319951718',
-    Telegram = 'rbxassetid://6319951718',
-    MusicNote = 'rbxassetid://6319951718',
-    Music = 'rbxassetid://6319951718',
-    Headphones = 'rbxassetid://6319951718',
-    Phone = 'rbxassetid://6319951718',
-    Smartphone = 'rbxassetid://6319951718',
-    Desktop = 'rbxassetid://6319951718',
-    Desktop2 = 'rbxassetid://6319951718',
-    Laptop = 'rbxassetid://6319951718',
-    Server = 'rbxassetid://6319951718',
-    Wedge = 'rbxassetid://6319951718',
-    Drill = 'rbxassetid://6319951718',
-    Character = 'rbxassetid://6319951718'
-}end function a.g
+=`Hello {D},{C}`}end end end end function a.f()return{Dot=
+'rbxasset://textures/whiteCircle.png',Arrow=
+'rbxasset://textures/ui/AvatarContextMenu_Arrow.png',Close=
+'rbxasset://textures/loading/cancelButton.png',Checkmark=
+'rbxasset://textures/ui/Lobby/Buttons/nine_slice_button.png',Cat=
+'rbxassetid://16211812161',Script='rbxassetid://11570895459',Settings=
+'rbxassetid://9743465390',Info='rbxassetid://18754976792',Move=
+'rbxassetid://6710235139',Roblox='rbxassetid://7414445494',Warning=
+'rbxassetid://11745872910',Audio='rbxassetid://302250236',Shop=
+'rbxassetid://6473525198',CharacterDance='rbxassetid://11932783331',Pants=
+'rbxassetid://10098755331',Home='rbxassetid://4034483344',Robux=
+'rbxassetid://5986143282',Badge='rbxassetid://16170504068',SpawnLocation=
+'rbxassetid://6400507398',Sword='rbxassetid://7485051715',Clover=
+'rbxassetid://11999300014',Star='rbxassetid://3057073083',Code=
+'rbxassetid://11348555035',Paw='rbxassetid://13001190533',Shield=
+'rbxassetid://7461510428',Shield2='rbxassetid://7169354142',File=
+'rbxassetid://7276823330',Book='rbxassetid://16061686835',Location=
+'rbxassetid://13549782519',Puzzle='rbxassetid://8898417863',Discord=
+'rbxassetid://84828491431270',Premium='rbxassetid://6487178625',Friend=
+'rbxassetid://10885655986',User='rbxassetid://18854794412',Duplicate=
+'rbxassetid://11833749507',ChatBox='rbxassetid://15839118471',ChatBox2=
+'rbxassetid://15839116089',Devices='rbxassetid://4458812712',Weight=
+'rbxassetid://9855685269',Image='rbxassetid://123311808092347',Profile=
+'rbxassetid://13585614795',Admin='rbxassetid://11656483170',PaintBrush=
+'rbxassetid://12111879608',Speed='rbxassetid://12641434961',NoConnection=
+'rbxassetid://9795340967',Connection='rbxassetid://119759670842477',Globe=
+'rbxassetid://18870359747',Box='rbxassetid://140217940575618',Crown=
+'rbxassetid://18826490498',Control='rbxassetid://18979524646',Send=
+'rbxassetid://18940312887',FastForward='rbxassetid://112963221295680',Pause=
+'rbxassetid://109949100737970',Reload='rbxassetid://11570018242',Joystick=
+'rbxassetid://18749336354',Controller='rbxassetid://11894535915',Lock=
+'rbxassetid://17783082088',Calculator='rbxassetid://85861816563977',Sun=
+'rbxassetid://13492317832',Moon='rbxassetid://8498174594',Prohibited=
+'rbxassetid://5248916036',Flag='rbxassetid://251346532',Website=
+'rbxassetid://98455290625865',Telegram='rbxassetid://115860270107061',MusicNote=
+'rbxassetid://18187351229',Music='rbxassetid://253830398',Headphones=
+'rbxassetid://1311321471',Phone='rbxassetid://8411963035',Smartphone=
+'rbxassetid://14040313879',Desktop='rbxassetid://3120635703',Desktop2=
+'rbxassetid://4728059490',Laptop='rbxassetid://4728059725',Server=
+'rbxassetid://9692125126',Wedge='rbxassetid://9086583059',Drill=
+'rbxassetid://11959189471',Character='rbxassetid://13285102351'}end function a.g
 ()return{Light=Color3.fromRGB(50,150,250),Dark=Color3.fromRGB(30,66,115),
 ExtraDark=Color3.fromRGB(28,39,53),White=Color3.fromRGB(240,240,240),Gray=Color3
 .fromRGB(172,171,175),Black=Color3.fromRGB(15,19,24),Yellow=Color3.fromRGB(230,

@@ -700,11 +700,10 @@ Text=`Hello {B},{z}`}end end local z=u:TreeNode{Title='With headers'}local A,B=z
 :Table{Border=true,RowBackground=true,MaxColumns=3},{'One','Two','Three'}for C=1
 ,7 do if C==1 then p=A:HeaderRow()else p=A:Row()end for D,E in B do if C==1 then
 local F=p:Column()F:Label{Text=E}continue end local F=p:NextColumn()F:Label{Text
-=`Hello {D},{C}`}end end end end function a.f()return{Dot=
-['rbxasset://textures/whiteCircle.png'],
-    Arrow = 'rbxasset://textures/ui/AvatarContextMenu_Arrow.png',
-    Close = 'rbxasset://textures/loading/cancelButton.png',
-    Checkmark = 'rbxasset://textures/ui/Lobby/Buttons/nine_slice_button.png',
+=`Hello {D},{C}`}end end end end function a.f()return{Dot='rbxasset://textures/whiteCircle.png',
+Arrow = 'rbxasset://textures/ui/AvatarContextMenu_Arrow.png',
+Close = 'rbxasset://textures/loading/cancelButton.png',
+Checkmark = 'rbxasset://textures/ui/Lobby/Buttons/nine_slice_button.png',
     Cat = 'rbxassetid://6319951718',
     Script = 'rbxassetid://6319951718',
     Settings = 'rbxassetid://6319951718',
@@ -926,7 +925,7 @@ MouseEnter={BackgroundTransparency=0.3},MouseLeave={BackgroundTransparency=0}},
 Init='MouseLeave'},Border={Connections={Selected={Transparency=0,Thickness=1},
 Deselected={Transparency=0.7,Thickness=1}},Init='Selected'}}return aa end end
 local aa,ab,ad,ae,af={Version='1.4.7',Author='Depso',License='MIT',Repository=
-'https://github.com/depthso/Dear-ReGui/',Debug=true,PrefabsId=6319951718,
+'https://github.com/depthso/Dear-ReGui/',Debug=false,PrefabsId=6319951718,
 DefaultTitle='ReGui',ContainerName='ReGui',DoubleClickThreshold=0.3,
 TooltipOffset=15,IniToSave={'Value'},ClassIgnored={'Visible','Text'},Container=
 nil,Prefabs=nil,FocusedWindow=nil,HasTouchScreen=false,Services=nil,Elements={},

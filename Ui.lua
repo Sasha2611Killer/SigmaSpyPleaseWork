@@ -151,7 +151,17 @@ function Ui:LoadFont()
 end
 
 function Ui:SetFontFile(FontFile: string)
-	self.FontJsonFile = FontFile
+    if FontFile and type(FontFile) == "string" and FontFile ~= "" then
+        local Success = pcall(function()
+            self.FontJsonFile = FontFile
+        end)
+        if Success then
+            return
+        end
+    end
+    
+    -- Если не сработало - базовый шрифт
+    self.FontJsonFile = nil
 end
 
 function Ui:FontWasSuccessful()

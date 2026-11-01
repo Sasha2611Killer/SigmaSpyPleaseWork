@@ -165,7 +165,7 @@ end
 function Process:CountMatches(String: string, Match: string): number
 	local Count = 0
 	for _ in String:gmatch(Match) do
-		Count +=1 
+		Count +=1
 	end
 
 	return Count
@@ -344,24 +344,38 @@ function Process:SetNewReturnSpoofs(NewReturnSpoofs: table)
     ReturnSpoofs = NewReturnSpoofs
 end
 
+--// ИЗМЕНЕНО: thread-aware разбор стека.
+--// Проблема oth: oth.hook исполняет callback на ОТДЕЛЬНОМ треде, поэтому
+--// стек вызывающего скрипта в этом треде отсутствует — caller-info не извлечь,
+--// корректно возвращаем nil (ProcessRemote это уже обрабатывает).
+--// Бонус: убран потенциальный бесконечный цикл оригинала (continue при
+--// выходе за границу стека) — теперь цикл ограничен 64 фреймами.
 function Process:FindCallingLClosure(Offset: number)
     local Getfenv = Hook:GetOriginalFunc(getfenv)
+
+    --// oth-тред: реальный caller живёт на другом треде
+    if Hook.IsOthThread and Hook:IsOthThread() then
+        return nil
+    end
+
     Offset += 1
 
-    while true do
-        Offset += 1
+    for Level = Offset, Offset + 64 do
+        --// Конец стека — выходим, а не продолжаем сканирование
+        if debug.info(Level, "l") == -1 then break end
 
-        --// Check if the stack level is valid
-        local IsValid = debug.info(Offset, "l") ~= -1
-        if not IsValid then continue end
+        local Function = debug.info(Level, "f")
+        if not Function then return nil end
 
-        --// Check if the function is valid
-        local Function = debug.info(Offset, "f")
-        if not Function then return end
-        if Getfenv(Function) == SigmaENV then continue end
+        --// Безопасно обходим C-функции без fenv
+        local Success, Env = pcall(Getfenv, Function)
+        if not Success then continue end
+        if Env == SigmaENV then continue end
 
         return Function
     end
+
+    return nil
 end
 
 function Process:Decompile(Script: LocalScript | ModuleScript): string
@@ -369,7 +383,7 @@ function Process:Decompile(Script: LocalScript | ModuleScript): string
     local ForceKonstant = Config.ForceKonstantDecompiler
 
     --// Use built-in decompiler if the executor supports it
-    if decompile and not ForceKonstant then 
+    if decompile and not ForceKonstant then
         return decompile(Script)
     end
 
@@ -437,8 +451,8 @@ function Process:ConnectionIsValid(Connection: table): boolean
         end
 
         --// Check if the property has a value
-        if Value == nil then 
-            return false 
+        if Value == nil then
+            return false
         end
     end
 
@@ -540,6 +554,10 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     local CallingFunction
     local SourceScript
 
+    --// ИЗМЕНЕНО: определяем один раз, выполняемся ли мы внутри oth-хука.
+    --// На oth-треде getcallingscript() вернёт неверный скрипт — обнуляем.
+    local IsOthThread = Hook.IsOthThread and Hook:IsOthThread() or false
+
     --// Add extra data into the log if needed
     local ExtraData = self.ExtraData
     if ExtraData then
@@ -555,13 +573,14 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     --// Add to queue
     self:Merge(Data, {
         Remote = cloneref(Remote),
-		CallingScript = getcallingscript(),
+        CallingScript = IsOthThread and nil or getcallingscript(),
         CallingFunction = CallingFunction,
         SourceScript = SourceScript,
         Id = Id,
 		ClassData = ClassData,
         Timestamp = Timestamp,
-        Args = {...}
+        Args = {...},
+        CallerUnavailable = IsOthThread or nil, -- флаг для UI: caller-info недоступна
     })
 
     --// Invoke the Remote and log return values

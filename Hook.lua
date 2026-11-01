@@ -347,6 +347,15 @@ function Hook:BeginHooks()
 	})
 end
 
+--// Скрытие функции из стека (Cobalt делает так для детуров).
+--// Должна быть объявлена ДО HookClientInvoke — иначе для него это глобал (nil).
+local function HideFromStack(Function)
+	if typeof(setstackhidden) == "function" then
+		pcall(setstackhidden, Function, true)
+	end
+	return Function
+end
+
 function Hook:HookClientInvoke(Remote, Method, Callback)
 	local Success, Function = pcall(function()
 		return getcallbackvalue(Remote, Method)
@@ -398,15 +407,6 @@ function Hook:MultiConnect(Remotes)
 	for _, Remote in next, Remotes do
 		self:ConnectClientRecive(Remote)
 	end
-end
-
---// Скрытие функции из стека (Cobalt делает так для детуров).
---// Executor без setstackhidden — просто пропускаем (pcall).
-local function HideFromStack(Function)
-	if typeof(setstackhidden) == "function" then
-		pcall(setstackhidden, Function, true)
-	end
-	return Function
 end
 
 function Hook:ConnectClientRecive(Remote)

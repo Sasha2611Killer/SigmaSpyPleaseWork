@@ -35,6 +35,17 @@ local ExeENV = getfenv(1)
 --// т.к. токен живёт в env функции и переживает clonefunction.
 local SpyVerificationToken = tostring(tick()) .. "_" .. tostring(math.random(1, 1e6))
 
+--// Capability detection: oth (C-level hooks, Cobalt OthHooks-аналог)
+local Capabilities = {
+	Oth = typeof(oth) == "table"
+		and typeof(oth.hook) == "function"
+		and typeof(oth.get_root_callback) == "function",
+}
+
+function Hook:HasOth(): boolean
+	return Capabilities.Oth
+end
+
 function Hook:Init(Data)
     Modules = Data.Modules
 
@@ -100,14 +111,50 @@ function Hook:ReplaceMetaMethod(Object: Instance, Call: string, Callback: MetaFu
 	return OriginalFunc
 end
 
---// hookfunction
+--// hookfunction / oth.hook — выбирается автоматически по capability detection.
+--// oth-бэкенд: хуки на C-уровне, корректный unhook, caller-инфо доступна
+--// (Process:FindCallingLClosure сканирует с уровня 2 на oth-треде).
 function Hook:HookFunction(Func: UnkFunc, Callback: UnkFunc)
-	local OriginalFunc
 	local WrappedCallback = newcclosure(Callback)
+
+	--// Современный путь: oth
+	if Capabilities.Oth then
+		local OriginalFunc
+		oth.hook(Func, function(...)
+			return HookMiddle(OriginalFunc, WrappedCallback, false, ...)
+		end)
+		OriginalFunc = oth.get_root_callback(Func)
+
+		self.PreviousFunctions[Func] = OriginalFunc
+		return OriginalFunc
+	end
+
+	--// Классический путь: hookfunction
+	local OriginalFunc
 	OriginalFunc = clonefunction(hookfunction(Func, function(...)
 		return HookMiddle(OriginalFunc, WrappedCallback, false, ...)
 	end))
 	return OriginalFunc
+end
+
+--// Снятие хука (oth.unhook → restorefunction → false).
+--// Раньше такой возможности в модуле не было.
+function Hook:UnhookFunction(Func: UnkFunc): boolean
+	if Capabilities.Oth and typeof(oth.unhook) == "function" then
+		local Ok = pcall(oth.unhook, Func)
+		if Ok then
+			self.PreviousFunctions[Func] = nil
+			return true
+		end
+	end
+
+	if typeof(restorefunction) == "function" then
+		restorefunction(Func)
+		self.PreviousFunctions[Func] = nil
+		return true
+	end
+
+	return false
 end
 
 --// hookmetamethod

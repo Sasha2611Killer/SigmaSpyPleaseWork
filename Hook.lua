@@ -348,7 +348,8 @@ function Hook:BeginHooks()
 end
 
 --// Скрытие функции из стека (Cobalt делает так для детуров).
---// Должна быть объявлена ДО HookClientInvoke — иначе для него это глобал (nil).
+--// ВАЖНО: объявлена ДО HookClientInvoke — иначе для неё это глобал (nil)
+--// и каждый RemoteFunction падает с "attempt to call a nil value".
 local function HideFromStack(Function)
 	if typeof(setstackhidden) == "function" then
 		pcall(setstackhidden, Function, true)

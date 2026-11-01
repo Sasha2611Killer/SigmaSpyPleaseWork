@@ -75,7 +75,10 @@ local Process = {
         [{"sirhurt", "potassium", "wave"}] = {
             ForceUseCustomComm = true
         }
-    }
+    },
+
+    --// Кэш runtime-проверок фич (Cobalt ExecutorSupport-style, облегчённый)
+    FeatureSupport = {},
 }
 
 --// Modules
@@ -98,6 +101,72 @@ type Event = RemoteEvent | RemoteFunction | UnreliableRemoteEvent | BindableEven
 local InstanceCreatedRemotes: typeof(setmetatable({} :: {[Event]: true}, {__mode = "k"})) = setmetatable({}, {
     __mode = "k"
 })
+
+--// Антиспам (порт поведения Cobalt Log:IsOverSpamThreshold):
+--// remote с >Threshold вызовами за Window секунд автоигнорируется в логах.
+--// Отключается флагом Config.AutoIgnoreSpam = false.
+local SpamCounts = setmetatable({}, {__mode = "k"})
+local SpamThreshold = 15
+local SpamWindow = 1
+
+--// Runtime-тесты фич (порт идеи Cobalt ExecutorSupport)
+local FeatureTests = {
+    ["oth"] = function()
+        if typeof(oth) ~= "table" or typeof(oth.hook) ~= "function" then return false end
+        local Test = Instance.new("BindableFunction")
+        local Ran = false
+        oth.hook(Test.Invoke, function()
+            Ran = true
+        end)
+        pcall(Test.Invoke)
+        pcall(oth.unhook, Test.Invoke)
+        Test:Destroy()
+        return Ran
+    end,
+    ["setstackhidden"] = function()
+        if typeof(setstackhidden) ~= "function" then return false end
+        setstackhidden(function() end, true)
+        return true
+    end,
+    ["getscriptfromthread"] = function()
+        if typeof(getscriptfromthread) ~= "function" then return false end
+        pcall(getscriptfromthread, coroutine.running())
+        return true
+    end,
+    ["on_actor_state_created"] = function()
+        return typeof(on_actor_state_created) == "RBXScriptSignal"
+    end,
+    ["firesignal"] = function()
+        return typeof(firesignal) == "function"
+    end,
+    ["restorefunction"] = function()
+        if typeof(restorefunction) ~= "function" or typeof(hookfunction) ~= "function" then return false end
+        local function Dummy() return 1 end
+        hookfunction(Dummy, function() return 2 end)
+        local Hooked = Dummy() == 2
+        restorefunction(Dummy)
+        return Hooked and Dummy() == 1
+    end,
+}
+
+function Process:IsFeatureWorking(Name: string): boolean
+    local Cached = self.FeatureSupport[Name]
+    if Cached ~= nil then return Cached end
+
+    local Test = FeatureTests[Name]
+    local Working = false
+
+    if Test then
+        local Ok, Result = pcall(Test)
+        Working = Ok and Result == true
+    else
+        --// Нет теста — проверяем хотя бы наличие
+        Working = self:FuncExists(Name) ~= nil
+    end
+
+    self.FeatureSupport[Name] = Working
+    return Working
+end
 
 function Process:Merge(Base: table, New: table)
     if not New then return end
@@ -344,30 +413,26 @@ function Process:SetNewReturnSpoofs(NewReturnSpoofs: table)
     ReturnSpoofs = NewReturnSpoofs
 end
 
---// ИЗМЕНЕНО: thread-aware разбор стека.
---// Проблема oth: oth.hook исполняет callback на ОТДЕЛЬНОМ треде, поэтому
---// стек вызывающего скрипта в этом треде отсутствует — caller-info не извлечь,
---// корректно возвращаем nil (ProcessRemote это уже обрабатывает).
---// Бонус: убран потенциальный бесконечный цикл оригинала (continue при
---// выходе за границу стека) — теперь цикл ограничен 64 фреймами.
+--// ПОИСК CALLING-L-CLOSURE (порт подхода Cobalt getcallingfunction):
+--// - на oth-треде фреймы вызывающего кода видны с уровня 2 (Cobalt использует BaseLevel 2)
+--// - [C]-фреймы пропускаем, сканирование ограничено 32 фреймами
+--// - при выходе за границу стека — break (НЕ continue: в старой версии тут был
+--//   бесконечный цикл, из-за которого зависали исходящие вызовы)
 function Process:FindCallingLClosure(Offset: number)
     local Getfenv = Hook:GetOriginalFunc(getfenv)
 
-    --// oth-тред: реальный caller живёт на другом треде
-    if Hook.IsOthThread and Hook:IsOthThread() then
-        return nil
-    end
+    local IsOth = Hook.IsOthThread and Hook:IsOthThread()
+    local Start = IsOth and 2 or ((Offset or 4) + 1)
 
-    Offset += 1
+    for Level = Start, Start + 32 do
+        local LineOk, Line = pcall(debug.info, Level, "l")
+        if not LineOk or Line == nil or Line == -1 then break end
 
-    for Level = Offset, Offset + 64 do
-        --// Конец стека — выходим, а не продолжаем сканирование
-        if debug.info(Level, "l") == -1 then break end
+        local Function, Source = debug.info(Level, "fs")
+        if not Function or not Source then break end
+        if Source == "[C]" then continue end
 
-        local Function = debug.info(Level, "f")
-        if not Function then return nil end
-
-        --// Безопасно обходим C-функции без fenv
+        --// C-функции без fenv обходим безопасно
         local Success, Env = pcall(Getfenv, Function)
         if not Success then continue end
         if Env == SigmaENV then continue end
@@ -415,8 +480,18 @@ function Process:Decompile(Script: LocalScript | ModuleScript): string
     return Responce.Body
 end
 
-function Process:GetScriptFromFunc(Func: (...any) -> ...any)
-    if not Func then return end
+--// ИЗМЕНЕНО: добавлен fallback через getscriptfromthread (Cobalt-style).
+--// Thread передаётся из receive-колбэков (там известен тред соединения).
+function Process:GetScriptFromFunc(Func, Thread)
+    if not Func then
+        if Thread and self:IsFeatureWorking("getscriptfromthread") then
+            local Ok, Script = pcall(getscriptfromthread, Thread)
+            if Ok and typeof(Script) == "Instance" then
+                return Script
+            end
+        end
+        return
+    end
 
     local Success, ENV = pcall(getfenv, Func)
     if not Success then return end
@@ -554,33 +629,56 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     local CallingFunction
     local SourceScript
 
-    --// ИЗМЕНЕНО: определяем один раз, выполняемся ли мы внутри oth-хука.
-    --// На oth-треде getcallingscript() вернёт неверный скрипт — обнуляем.
-    local IsOthThread = Hook.IsOthThread and Hook:IsOthThread() or false
-
     --// Add extra data into the log if needed
     local ExtraData = self.ExtraData
     if ExtraData then
         self:Merge(Data, ExtraData)
     end
 
-    --// Get caller information
+    --// Get caller information (IsReceive этот код не выполняет —
+    --// поэтому входящие работали, а исходящие зависали в старой версии)
     if not IsReceive then
         CallingFunction = self:FindCallingLClosure(6)
         SourceScript = CallingFunction and self:GetScriptFromFunc(CallingFunction) or nil
     end
 
+    --// ИЗМЕНЕНО: антиспам (порт Cobalt Log:IsOverSpamThreshold).
+    --// Remote при этом ВЫПОЛНЯЕТСЯ (через ProcessCallback), подавляется только лог.
+    local Now = tick()
+    local Spam = SpamCounts[Remote]
+    if not Spam then
+        Spam = {Count = 0, Window = Now}
+        SpamCounts[Remote] = Spam
+    end
+    if Now - Spam.Window >= SpamWindow then
+        Spam.Count = 0
+        Spam.Window = Now
+    end
+    Spam.Count += 1
+
+    if Spam.Count > SpamThreshold and Config.AutoIgnoreSpam ~= false then
+        if Spam.Count == SpamThreshold + 1 then
+            pcall(function()
+                local Name = select(2, pcall(Hook.Index, Hook, Remote, "Name"))
+                Communication:ConsolePrint(`Auto-ignored spammy remote ({SpamThreshold}+ calls/sec): {Name}`)
+            end)
+        end
+
+        --// Без логирования — но Block/Spoof/оригинал отрабатывают
+        return ProcessCallback(Data, Remote, ...)
+    end
+
     --// Add to queue
     self:Merge(Data, {
         Remote = cloneref(Remote),
-        CallingScript = IsOthThread and nil or getcallingscript(),
+        CallingScript = getcallingscript(),
         CallingFunction = CallingFunction,
         SourceScript = SourceScript,
         Id = Id,
 		ClassData = ClassData,
         Timestamp = Timestamp,
         Args = {...},
-        CallerUnavailable = IsOthThread or nil, -- флаг для UI: caller-info недоступна
+        CallerUnavailable = (not IsReceive and not CallingFunction) or nil,
     })
 
     --// Invoke the Remote and log return values

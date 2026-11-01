@@ -30,83 +30,6 @@ local Communication
 
 local ExeENV = getfenv(1)
 
----------------------------------------------------------------------
---// INTERNAL API HELPERS (не публичные, не меняют структуру Hook)
----------------------------------------------------------------------
-
---// Безопасный вызов is_hook_thread (oth)
-local function IsHookThread(): boolean
-	if oth and oth.is_hook_thread then
-		local ok, res = pcall(oth.is_hook_thread)
-		if ok then return res end
-	end
-	return false
-end
-
---// Универсальный хук функции. Для C-замыканий — oth, иначе hookfunction/closures.
---// Возвращает корневую (оригинальную) функцию.
-local function SafeHookFunction(Func, Callback)
-	--// oth — только для C-замыканий
-	if oth and oth.hook and iscclosure(Func) then
-		local ok = pcall(oth.hook, Func, Callback)
-		if ok then
-			return function(...)
-				local root = (oth.get_root_callback and oth.get_root_callback(Func)) or Func
-				return root(...)
-			end
-		end
-	end
-
-	--// closures (если есть)
-	if closures and closures.hookfunction then
-		local ok, old = pcall(closures.hookfunction, Func, Callback)
-		if ok then return old end
-	end
-
-	--// legacy hookfunction
-	if hookfunction then
-		local ok, old = pcall(hookfunction, Func, Callback)
-		if ok then return old end
-	end
-
-	error("No function hooking API available")
-end
-
---// Универсальный хук метаметода: сначала hookmetamethod, потом rawmetatable
-local function SafeHookMetaMethod(Object, Call, Callback)
-	if hookmetamethod then
-		local ok, old = pcall(hookmetamethod, Object, Call, Callback)
-		if ok then return old end
-	end
-	return nil --// сигнал «используй fallback»
-end
-
---// Чтение свойства с identity 8
-local function IndexWithIdentity(Object, Key)
-	local getId = getidentity or getthreadidentity
-	local setId = setidentity or setthreadidentity
-	if not getId or not setId then
-		return Object[Key]
-	end
-	local identity = getId()
-	setId(8)
-	local returned = Object[Key]
-	setId(identity)
-	return returned
-end
-
---// Получить callback remote-функции
-local function SafeGetCallbackValue(Remote, Method)
-	if getcallbackvalue then
-		local ok, value = pcall(getcallbackvalue, Remote, Method)
-		if ok then return true, value end
-	end
-	local ok, value = pcall(function() return Remote[Method] end)
-	return ok, value
-end
-
----------------------------------------------------------------------
-
 function Hook:Init(Data)
     Modules = Data.Modules
 
@@ -118,14 +41,6 @@ end
 
 --// The callback is expected to return a nil value sometimes which should be ingored
 local HookMiddle = newcclosure(function(OriginalFunc, Callback, AlwaysTable: boolean?, ...)
-	--// Защита от рекурсии, если мы уже внутри потока хука
-	if IsHookThread() then
-		if AlwaysTable then
-			return {OriginalFunc(...)}
-		end
-		return OriginalFunc(...)
-	end
-
 	--// Invoke callback and check for a reponce otherwise ignored
 	local ReturnValues = Callback(...)
 	if ReturnValues then
@@ -154,54 +69,47 @@ local function Merge(Base: table, New: table)
 end
 
 function Hook:Index(Object: Instance, Key: string)
-	return IndexWithIdentity(Object, Key)
+    local identity = getthreadidentity()
+    setthreadidentity(8)
+    local returned = Object[Key]
+    setthreadidentity(identity)
+	return returned
 end
 
 function Hook:PushConfig(Overwrites)
     Merge(self, Overwrites)
 end
 
---// getrawmetatable (fallback-путь, оставлен как есть по структуре)
+--// getrawmetatable
 function Hook:ReplaceMetaMethod(Object: Instance, Call: string, Callback: MetaFunc): MetaFunc
-	local ok, Metatable = pcall(getrawmetatable, Object)
-	if not ok or not Metatable then
-		error("getrawmetatable unavailable")
-	end
-
+	local Metatable = getrawmetatable(Object)
 	local OriginalFunc = clonefunction(Metatable[Call])
-
+	
 	--// Replace function
-	pcall(setreadonly, Metatable, false)
+	setreadonly(Metatable, false)
 	Metatable[Call] = newcclosure(function(...)
 		return HookMiddle(OriginalFunc, Callback, false, ...)
 	end)
-	pcall(setreadonly, Metatable, true)
+	setreadonly(Metatable, true)
 
 	return OriginalFunc
 end
 
---// hookfunction (теперь через SafeHookFunction: oth для C, иначе hookfunction)
+--// hookfunction
 function Hook:HookFunction(Func: UnkFunc, Callback: UnkFunc)
-	local WrappedCallback = newcclosure(Callback)
 	local OriginalFunc
-
-	OriginalFunc = SafeHookFunction(Func, function(...)
+	local WrappedCallback = newcclosure(Callback)
+	OriginalFunc = clonefunction(hookfunction(Func, function(...)
 		return HookMiddle(OriginalFunc, WrappedCallback, false, ...)
-	end)
-
-	--// Кэшируем оригинал для GetOriginalFunc
-	self.PreviousFunctions[Func] = OriginalFunc
+	end))
 	return OriginalFunc
 end
 
---// hookmetamethod (fallback-путь через hookfunction на метаметоде)
+--// hookmetamethod
 function Hook:HookMetaCall(Object: Instance, Call: string, Callback: MetaFunc): MetaFunc
-	local ok, Metatable = pcall(getrawmetatable, Object)
-	if not ok or not Metatable then
-		error("getrawmetatable unavailable")
-	end
-
+	local Metatable = getrawmetatable(Object)
 	local Unhooked
+	
 	Unhooked = self:HookFunction(Metatable[Call], function(...)
 		return HookMiddle(Unhooked, Callback, true, ...)
 	end)
@@ -210,20 +118,13 @@ end
 
 function Hook:HookMetaMethod(Object: Instance, Call: string, Callback: MetaFunc): MetaFunc
 	local Func = newcclosure(Callback)
-
-	--// Сначала пробуем нативный hookmetamethod
-	local old = SafeHookMetaMethod(Object, Call, Func)
-	if old ~= nil then
-		self.PreviousFunctions[Call] = old
-		return old
-	end
-
+	
 	--// Getrawmetatable
 	if Config.ReplaceMetaCallFunc then
 		return self:ReplaceMetaMethod(Object, Call, Func)
 	end
-
-	--// Hookmetamethod (через hookfunction на метаметоде)
+	
+	--// Hookmetamethod
 	return self:HookMetaCall(Object, Call, Func)
 end
 
@@ -301,11 +202,11 @@ end
 
 function Hook:RunOnActors(Code: string, ChannelId: number)
 	if not getactors or not run_on_actor then return end
-
+	
 	local Actors = getactors()
 	if not Actors then return end
-
-	for _, Actor in Actors do
+	
+	for _, Actor in Actors do 
 		pcall(run_on_actor, Actor, Code, ChannelId)
 	end
 end
@@ -321,24 +222,7 @@ local function ProcessRemote(OriginalFunc, MetaMethod: string, self, Method: str
 end
 
 function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
-	--// Пытаемся переиспользовать существующий инстанс, чтобы не создавать новый
-	local Remote
-	if getnilinstances then
-		for _, inst in next, getnilinstances() do
-			if inst.ClassName == ClassName and inst[FuncName] then
-				Remote = inst
-				break
-			end
-		end
-	end
-	if not Remote then
-		local ok, inst = pcall(function()
-			return Instance.new(ClassName)
-		end)
-		if not ok or not inst then return end
-		Remote = inst
-	end
-
+	local Remote = Instance.new(ClassName)
 	local Func = Remote[FuncName]
 	local OriginalFunc
 
@@ -347,7 +231,7 @@ function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
 	--// Addionally, this is for __index calls.
 	--// 	A __namecall hook will not detect this
 	OriginalFunc = self:HookFunction(Func, function(self, ...)
-		--// Check if the Object is allowed
+		--// Check if the Object is allowed 
 		if not Process:RemoteAllowed(self, "Send", FuncName) then return end
 
 		--// Process the remote data
@@ -381,12 +265,14 @@ function Hook:BeginHooks()
 end
 
 function Hook:HookClientInvoke(Remote, Method, Callback)
-	local Success, Function = SafeGetCallbackValue(Remote, Method)
+	local Success, Function = pcall(function()
+		return getcallbackvalue(Remote, Method)
+	end)
 
 	--// Some executors like Potassium will throw a error if the Callback value is nil
 	if not Success then return end
 	if not Function then return end
-
+	
 	--// Test hookfunction
 	local HookSuccess = pcall(function()
 		self:HookFunction(Function, Callback)
@@ -394,12 +280,9 @@ function Hook:HookClientInvoke(Remote, Method, Callback)
 	if HookSuccess then return end
 
 	--// Replace callback function otherwise
-	local ok = pcall(function()
-		Remote[Method] = function(...)
-			return HookMiddle(Function, Callback, false, ...)
-		end
-	end)
-	return ok
+	Remote[Method] = function(...)
+		return HookMiddle(Function, Callback, false, ...)
+	end
 end
 
 function Hook:MultiConnect(Remotes)
@@ -495,7 +378,7 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 			Communication:ConsolePrint("Hooks loaded")
 		end
 	})
-
+	
 	--// Process configuration
 	ProcessLib:SetChannel(Channel, IsWrapped)
 	ProcessLib:SetExtraData(ExtraData)
@@ -515,7 +398,7 @@ function Hook:LoadMetaHooks(ActorCode: string, ChannelId: number)
 	end
 
 	--// Hook current thread
-	self:BeginService(Modules, nil, ChannelId)
+	self:BeginService(Modules, nil, ChannelId) 
 end
 
 function Hook:LoadReceiveHooks()

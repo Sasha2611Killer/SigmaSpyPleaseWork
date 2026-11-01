@@ -71,6 +71,9 @@ local Process = {
     },
     RemoteOptions = {},
     LoopingRemotes = {},
+
+    --// Функции-логгеры Sigma Spy (не показывать в списке соединений)
+    LogConnectionFunctions = setmetatable({}, {__mode = "k"}),
     ConfigOverwrites = {
         [{"sirhurt", "potassium", "wave"}] = {
             ForceUseCustomComm = true
@@ -448,32 +451,13 @@ function Process:GetScriptFromFunc(Func: (...any) -> ...any)
 end
 
 function Process:ConnectionIsValid(Connection: table): boolean
-    local ValueReplacements = {
-		["Script"] = function(Connection: table): Script?
-			local Function = Connection.Function
-			if not Function then return end
-
-			return self:GetScriptFromFunc(Function)
-		end
-	}
-
-    --// Check if these properties are valid
-    local ToCheck = {
-        "Script"
-    }
-    for _, Property in ToCheck do
-        local Replacement = ValueReplacements[Property]
-        local Value
-
-        --// Check if there's a function for a property
-        if Replacement then
-            Value = Replacement(Connection)
-        end
-
-        --// Check if the property has a value
-        if Value == nil then 
-            return false 
-        end
+    --// ИЗМЕНЕНО: соединение валидно, если у него есть функция.
+    --// Скрипт-источник может быть неопределим (C-closures, loadstring,
+    --// executor-код) — Cobalt такие соединения всё равно показывает.
+    --// Старая версия фильтровала их по Script == nil → "0 connections"
+    --// для событий, которые точно кем-то обрабатывались.
+    if Connection.Function == nil then
+        return false
     end
 
     return true
@@ -484,6 +468,10 @@ function Process:FilterConnections(Signal: RBXScriptSignal): table
 
     --// Filter each connection
     for _, Connection in getconnections(Signal) do
+        --// Пропускаем собственные логгер-функции спайа:
+        --// реестр по ссылке ИЛИ env-токен (Cobalt-style, переживает clonefunction)
+        if self.LogConnectionFunctions[Connection.Function] then continue end
+        if Hook.IsSpyConnectionFunction and Hook:IsSpyConnectionFunction(Connection.Function) then continue end
         if not self:ConnectionIsValid(Connection) then continue end
         table.insert(Processed, Connection)
     end

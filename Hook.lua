@@ -202,12 +202,31 @@ end
 
 function Hook:RunOnActors(Code: string, ChannelId: number)
 	if not getactors or not run_on_actor then return end
-	
-	local Actors = getactors()
-	if not Actors then return end
-	
-	for _, Actor in Actors do 
+
+	local function HookActor(Actor)
 		pcall(run_on_actor, Actor, Code, ChannelId)
+	end
+
+	--// Текущие + удалённые (неинициализированные) акторы — как в Cobalt
+	for _, Category in {getactors(), typeof(getdeletedactors) == "function" and getdeletedactors() or {}} do
+		if Category then
+			for _, Actor in next, Category do
+				HookActor(Actor)
+			end
+		end
+	end
+
+	--// Акторы, созданные ПОЗЖЕ: нативное событие → fallback DescendantAdded.
+	--// В старой версии такие акторы вообще не хукались.
+	local StateCreated = typeof(on_actor_state_created) == "RBXScriptSignal" and on_actor_state_created or nil
+	if StateCreated then
+		StateCreated:Connect(HookActor)
+	else
+		game.DescendantAdded:Connect(function(Instance)
+			if typeof(Instance) == "Instance" and Instance:IsA("Actor") then
+				HookActor(Instance)
+			end
+		end)
 	end
 end
 
@@ -279,16 +298,25 @@ function Hook:HookClientInvoke(Remote, Method, Callback)
 	end)
 	if HookSuccess then return end
 
-	--// Replace callback function otherwise
-	Remote[Method] = function(...)
+	--// Replace callback function otherwise (скрыт из стека, Cobalt-style)
+	Remote[Method] = HideFromStack(function(...)
 		return HookMiddle(Function, Callback, false, ...)
-	end
+	end)
 end
 
 function Hook:MultiConnect(Remotes)
 	for _, Remote in next, Remotes do
 		self:ConnectClientRecive(Remote)
 	end
+end
+
+--// Скрытие функции из стека (Cobalt делает так для детуров).
+--// Executor без setstackhidden — просто пропускаем (pcall).
+local function HideFromStack(Function)
+	if typeof(setstackhidden) == "function" then
+		pcall(setstackhidden, Function, true)
+	end
+	return Function
 end
 
 function Hook:ConnectClientRecive(Remote)
@@ -305,15 +333,15 @@ function Hook:ConnectClientRecive(Remote)
 	--// Check if the Recive should be hooked
 	if NoReciveHook then return end
 
-	--// New callback function
-	local function Callback(...)
+	--// New callback function (скрыт из стека, Cobalt-style)
+	local Callback = HideFromStack(function(...)
         return Process:ProcessRemote({
             Method = Method,
             IsReceive = true,
             MetaMethod = "Connect",
 			IsExploit = checkcaller()
         }, Remote, ...)
-	end
+	end)
 
 	--// Connect remote
 	if not IsRemoteFunction then

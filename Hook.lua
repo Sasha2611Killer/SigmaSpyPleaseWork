@@ -1,13 +1,15 @@
 --!nolint DeprecatedApi
 
 --[[
-	Обновлённый модуль Hook.
-	Что изменено:
-	- Capability detection: oth и библиотека Actors используются автоматически, если существуют
-	- Hook:HookFunction — использует oth.hook при наличии (с фоллбэком на hookfunction)
-	- Hook:UnhookFunction — снятие хуков через oth.unhook / restorefunction
-	- Hook:IsOthThread / Hook:HasOth / Hook:HasNewActors / Hook:GetCapabilities
-	- Hook:RunOnActors — подписывается на on_actor_state_created (акторы, созданные позже)
+	Обновлённый модуль Hook (v2 — с портами из Cobalt).
+	Изменения относительно оригинала:
+	- Capability detection: oth и библиотека Actors используются автоматически
+	- Hook:HookFunction — oth.hook при наличии (фоллбэк hookfunction)
+	- Hook:UnhookFunction — снятие хуков (oth.unhook / restorefunction)
+	- Hook:RunOnActors — getdeletedactors + подписка на новые акторы
+	  (Actors.on_actor_state_created → глобальное on_actor_state_created →
+	  fallback game.DescendantAdded), как у Cobalt
+	- setstackhidden на receive-колбэках (Cobalt делает так для детуров)
 	- Все хуки кэшируют оригинал в PreviousFunctions
 ]]
 
@@ -36,8 +38,7 @@ local Communication
 
 local ExeENV = getfenv(1)
 
---// Capability detection — выполняется один раз при загрузке.
---// oth / Actors могут отсутствовать в окружении: обращение к ним безопасно (nil).
+--// Capability detection — один раз при загрузке
 local Capabilities = {
 	Oth = typeof(oth) == "table"
 		and typeof(oth.hook) == "function"
@@ -59,8 +60,7 @@ function Hook:GetCapabilities(): table
 	return Capabilities
 end
 
---// True, если текущий код выполняется внутри oth-хука (oth исполняет
---// callback на отдельном треде — это важно для разбора стека вызовов)
+--// True, если текущий код выполняется внутри oth-хука
 function Hook:IsOthThread(): boolean
 	if not Capabilities.Oth then return false end
 	if typeof(oth.is_hook_thread) ~= "function" then return false end
@@ -132,12 +132,11 @@ function Hook:ReplaceMetaMethod(Object: Instance, Call: string, Callback: MetaFu
 	return OriginalFunc
 end
 
---// hookfunction / oth.hook — выбирается автоматически по capability detection.
---// Семантика возврата идентична: возвращается оригинал функции.
+--// hookfunction / oth.hook — выбирается автоматически
 function Hook:HookFunction(Func: UnkFunc, Callback: UnkFunc)
 	local WrappedCallback = newcclosure(Callback)
 
-	--// Современный путь: oth (C-closure хуки, root callback, unhook)
+	--// Современный путь: oth
 	if Capabilities.Oth then
 		local OriginalFunc
 		oth.hook(Func, function(...)
@@ -145,7 +144,6 @@ function Hook:HookFunction(Func: UnkFunc, Callback: UnkFunc)
 		end)
 		OriginalFunc = oth.get_root_callback(Func)
 
-		--// Кэшируем оригинал (раньше кэшировалось только в PatchFunctions)
 		self.PreviousFunctions[Func] = OriginalFunc
 		return OriginalFunc
 	end
@@ -159,8 +157,7 @@ function Hook:HookFunction(Func: UnkFunc, Callback: UnkFunc)
 	return OriginalFunc
 end
 
---// Снятие хука. Раньше такой возможности не было вовсе.
---// Возвращает true, если удалось снять.
+--// Снятие хука
 function Hook:UnhookFunction(Func: UnkFunc): boolean
 	if Capabilities.Oth and typeof(oth.unhook) == "function" then
 		oth.unhook(Func)
@@ -201,17 +198,13 @@ function Hook:HookMetaMethod(Object: Instance, Call: string, Callback: MetaFunc)
 end
 
 --// This includes a few patches for executor functions that result in detection
---// This isn't bulletproof since some functions like hookfunction I can't patch
---// By the way, thanks for copying this guys! Super appreciate the copycat
 function Hook:PatchFunctions()
 	--// Check if this function is disabled in the configuration
 	if Config.NoFunctionPatching then return end
 
 	local Patches = {
 		--// Error detection patch
-		--// hookfunction may still be detected depending on the executor
-		--// ПРИМЕЧАНИЕ: с oth сигнатуры "C stack overflow" могут отличаться —
-		--// патч всё равно срабатывает, но строку ошибки стоит проверить на твоём executor'е
+		--// ПРИМЕЧАНИЕ: с oth сигнатуры "C stack overflow" могут отличаться
 		[pcall] =  function(OldFunc, Func, ...)
 			local Responce = {OldFunc(Func, ...)}
 			local Success, Error = Responce[1], Responce[2]
@@ -274,41 +267,64 @@ function Hook:GetOriginalFunc(Func)
 	return self.PreviousFunctions[Func] or Func
 end
 
---// Запуск кода на акторах.
---// Современный путь (Actors): хук текущих акторов + подписка на вновь созданные.
---// Legacy путь: разовый проход по getactors().
-function Hook:RunOnActors(Code: string, ChannelId: number)
-	if Capabilities.NewActors then
-		local function HookAllActors()
-			local ActorList = Actors.getactors()
-			if not ActorList then return end
-
-			for _, Actor in next, ActorList do
-				pcall(Actors.run_on_actor, Actor, Code, ChannelId)
-			end
-		end
-
-		--// Текущие акторы
-		HookAllActors()
-
-		--// Акторы, созданные ПОЗЖЕ (в legacy-варианте это было упущено)
-		local Signal = Actors.on_actor_state_created
-		if typeof(Signal) == "RBXScriptSignal" then
-			Signal:Connect(HookAllActors)
-		end
-
+--// Подписка на появление новых акторов (порт подхода Cobalt):
+--// новая библиотека Actors → глобальное событие → fallback через DescendantAdded
+local function SubscribeToNewActors(Callback: (Instance) -> ())
+	if Capabilities.NewActors and typeof(Actors.on_actor_state_created) == "RBXScriptSignal" then
+		Actors.on_actor_state_created:Connect(Callback)
 		return
 	end
 
-	--// Legacy путь
-	if not getactors or not run_on_actor then return end
-
-	local ActorsList = getactors()
-	if not ActorsList then return end
-
-	for _, Actor in ActorsList do
-		pcall(run_on_actor, Actor, Code, ChannelId)
+	if typeof(on_actor_state_created) == "RBXScriptSignal" then
+		on_actor_state_created:Connect(Callback)
+		return
 	end
+
+	--// Fallback: ловим акторов как инстансы
+	game.DescendantAdded:Connect(function(Instance)
+		if typeof(Instance) == "Instance" and Instance:IsA("Actor") then
+			Callback(Instance)
+		end
+	end)
+end
+
+--// Запуск кода на акторх (порт подхода Cobalt: перебираем getactors И
+--// getdeletedactors, подписываемся на новые состояния акторов)
+function Hook:RunOnActors(Code: string, ChannelId: number)
+	local RunOnActor = Capabilities.NewActors and Actors.run_on_actor or run_on_actor
+	if typeof(RunOnActor) ~= "function" then return end
+
+	local function HookActor(Actor)
+		pcall(RunOnActor, Actor, Code, ChannelId)
+	end
+
+	local function HookAllActors()
+		local Categories = {}
+
+		if Capabilities.NewActors then
+			table.insert(Categories, Actors.getactors())
+		elseif typeof(getactors) == "function" then
+			table.insert(Categories, getactors())
+		end
+
+		--// Удалённые (неинициализированные) акторы — Cobalt хукает и их
+		if typeof(getdeletedactors) == "function" then
+			table.insert(Categories, getdeletedactors())
+		end
+
+		for _, Category in Categories do
+			if not Category then continue end
+			for _, Actor in next, Category do
+				HookActor(Actor)
+			end
+		end
+	end
+
+	--// Текущие + удалённые
+	HookAllActors()
+
+	--// Акторы, созданные позже
+	SubscribeToNewActors(HookAllActors)
 end
 
 local function ProcessRemote(OriginalFunc, MetaMethod: string, self, Method: string, ...)
@@ -380,9 +396,16 @@ function Hook:HookClientInvoke(Remote, Method, Callback)
 	if HookSuccess then return end
 
 	--// Replace callback function otherwise
-	Remote[Method] = function(...)
+	local Detour = function(...)
 		return HookMiddle(Function, Callback, false, ...)
 	end
+
+	--// Скрываем детур из стека (Cobalt-style, если поддерживается)
+	if typeof(setstackhidden) == "function" then
+		pcall(setstackhidden, Detour, true)
+	end
+
+	Remote[Method] = Detour
 end
 
 function Hook:MultiConnect(Remotes)
@@ -391,33 +414,41 @@ function Hook:MultiConnect(Remotes)
 	end
 end
 
+--// Скрытие колбэка из стека (Cobalt: setstackhidden на детурах)
+local function HideFromStack(Function)
+	if typeof(setstackhidden) == "function" then
+		pcall(setstackhidden, Function, true)
+	end
+	return Function
+end
+
 function Hook:ConnectClientRecive(Remote)
 	--// Check if the Remote class is allowed for receiving
 	local Allowed = Process:RemoteAllowed(Remote, "Receive")
 	if not Allowed then return end
 
 	--// Check if the Object has Remote class data
-	local ClassData = Process:GetClassData(Remote)
-	local IsRemoteFunction = ClassData.IsRemoteFunction
+    local ClassData = Process:GetClassData(Remote)
+    local IsRemoteFunction = ClassData.IsRemoteFunction
 	local NoReciveHook = ClassData.NoReciveHook
-	local Method = ClassData.Receive[1]
+    local Method = ClassData.Receive[1]
 
 	--// Check if the Recive should be hooked
 	if NoReciveHook then return end
 
 	--// New callback function
-	local function Callback(...)
-		return Process:ProcessRemote({
-			Method = Method,
-			IsReceive = true,
-			MetaMethod = "Connect",
+	local Callback = HideFromStack(function(...)
+        return Process:ProcessRemote({
+            Method = Method,
+            IsReceive = true,
+            MetaMethod = "Connect",
 			IsExploit = checkcaller()
-		}, Remote, ...)
-	end
+        }, Remote, ...)
+	end)
 
 	--// Connect remote
 	if not IsRemoteFunction then
-		Remote[Method]:Connect(Callback)
+   		Remote[Method]:Connect(Callback)
 	else -- Remote functions
 		self:HookClientInvoke(Remote, Method, Callback)
 	end
@@ -458,6 +489,7 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 
 	--// Communication configuration
 	local Channel, IsWrapped = Communication:GetCommChannel(ChannelId)
+	assert(Channel, `Comm channel {ChannelId} not found`)
 	Communication:SetChannel(Channel)
 	Communication:AddTypeCallbacks({
 		["RemoteData"] = function(Id: string, RemoteData)

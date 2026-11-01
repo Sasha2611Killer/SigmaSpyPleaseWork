@@ -316,18 +316,35 @@ function Generation:RemoteScript(Module, Data: RemoteData, ScriptType: string): 
 	--// Remote info
 	local ClassName = Hook:Index(Remote, "ClassName")
 	local IsNilParent = Hook:Index(Remote, "Parent") == nil
-	
+
 	local Variables = Module.Variables
 	local Formatter = Module.Formatter
-	
+
 	--// Pre-render variables
 	Variables:PrerenderVariables(Args, {"Instance"})
 
+	--// Nil-parented remote: Cobalt-style GetNil lookup через getnilinstances.
+	--// Обычный путь к remote с parent == nil в другой сессии не сработает.
+	local GetNilCode = nil
+	local RemoteValue = Formatter:Format(Remote, {
+		NoVariables = true
+	})
+
+	if IsNilParent then
+		local DebugId = Communication:GetDebugId(Remote)
+		local Name = Hook:Index(Remote, "Name")
+
+		--// Экранирование кавычек и слэшей
+		Name = Name:gsub("\\", "\\\\"):gsub('"', '\\"')
+		DebugId = tostring(DebugId):gsub("\\", "\\\\"):gsub('"', '\\"')
+
+		RemoteValue = `GetNil("{Name}", "{DebugId}")`
+		GetNilCode = 'local function GetNil(Name, DebugId)\n\tfor _, Object in getnilinstances() do\n\t\tif Object.Name == Name and Object:GetDebugId() == DebugId then\n\t\t\treturn Object\n\t\tend\n\tend\nend\n\n'
+	end
+
 	--// Create remote variable
 	local RemoteVariable = Variables:MakeVariable({
-		Value = Formatter:Format(Remote, {
-			NoVariables = true
-		}),
+		Value = RemoteValue,
 		Comment = `{ClassName} {IsNilParent and "| Remote parent is nil" or ""}`,
 		Name = Formatter:MakeName(Remote),
 		Lookup = Remote,
@@ -351,8 +368,11 @@ function Generation:RemoteScript(Module, Data: RemoteData, ScriptType: string): 
 		MetaMethod = MetaMethod
 	})
 	
-	--// Make code
+	--// Make code (GetNil-код идёт первым, чтобы remote-переменная его видела)
 	local Code = self:GetBase(Module)
+	if GetNilCode then
+		Code = GetNilCode .. Code
+	end
 	return `{Code}\n{CallCode}`
 end
 

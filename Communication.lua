@@ -14,6 +14,23 @@ CommWrapper.__index = CommWrapper
 local SerializeCache = setmetatable({}, {__mode = "k"})
 local DeserializeCache = setmetatable({}, {__mode = "k"})
 
+--// Предел очереди: при флуде дропаем новые пакеты, а не копим бесконечно
+--// (переполненная очередь = захламление главного потока = залипание GUI)
+local MaxQueueSize = 200
+
+--// Файл отладки: ошибки пишутся на диск, чтобы не нужно было копировать
+--// из GUI, когда GUI залагало
+local DebugFile = "SigmaSpy-debug.log"
+local function DebugLog(...)
+    local Parts = {}
+    for _, Value in {...} do
+        table.insert(Parts, tostring(Value))
+    end
+
+    local Line = os.date("%X") .. " | " .. table.concat(Parts, " ") .. "\n"
+    pcall(appendfile, DebugFile, Line)
+end
+
 --// Services
 local CoreGui
 
@@ -51,6 +68,12 @@ end
 
 function CommWrapper:Fire(...)
     local Queue = self.Queue
+
+    --// При переполнении дропаем пакет: лучше потерять лог, чем заморозить UI
+    if #Queue >= MaxQueueSize then
+        return
+    end
+
     table.insert(Queue, {...})
 end
 
@@ -59,8 +82,6 @@ function CommWrapper:ProcessArguments(Arguments)
     Channel:Fire(Process:Unpack(Arguments))
 end
 
---// ИЗМЕНЕНО: элементы обрабатываются в порядке очереди (remove(Queue, 1))
---// вместо перевёрнутого порядка table.remove(Queue) с фиксированной границей
 function CommWrapper:ProcessQueue()
     local Queue = self.Queue
 
@@ -68,9 +89,12 @@ function CommWrapper:ProcessQueue()
         local Arguments = table.remove(Queue, 1)
         if Arguments == nil then break end
 
-        pcall(function()
+        local Ok, Err = pcall(function()
             self:ProcessArguments(Arguments)
         end)
+        if not Ok then
+            DebugLog("CommWrapper error:", Err)
+        end
     end
 end
 
@@ -131,7 +155,6 @@ function Module:CreateCommChannel(): (number, any)
         if Success and Channel then
             return ChannelId, Channel
         end
-        --// Native не сработал — падаем в кастомный путь ниже
     end
 
     local Parent = self:GetHiddenParent()
@@ -154,7 +177,6 @@ function Module:GetCommChannel(ChannelId: number): (any, boolean)
         if Success and NativeChannel then
             return NativeChannel, false
         end
-        --// Native не сработал — падаем в кастомный путь ниже
     end
 
     local Parent = self:GetHiddenParent()
@@ -187,7 +209,7 @@ local Tick = 0
 function Module:WaitCheck()
     Tick += 1
     if Tick > 40 then
-        Tick = 0 -- I could use modulus here but the interger will be massive
+        Tick = 0
         wait()
     end
 end
@@ -249,15 +271,26 @@ function Module:SetChannel(NewChannel: number)
 end
 
 function Module:ConsolePrint(...)
-    self:Communicate("Print", ...)
+    local Ok, Err = pcall(self.Communicate, self, "Print", ...)
+    if not Ok then
+        DebugLog("ConsolePrint error:", Err)
+    end
 end
 
+--// ИЗМЕНЕНО: xpcall + запись ошибки в файл. Если GUI залагало, ошибки
+--// всё равно можно прочитать из workspace-файла SigmaSpy-debug.log
 function Module:QueueLog(Data)
-    spawn(function()
-        local SerializedArgs = self:SerializeTable(Data.Args)
-        Data.Args = SerializedArgs
+    task.spawn(function()
+        local Ok, Err = xpcall(function()
+            local SerializedArgs = self:SerializeTable(Data.Args)
+            Data.Args = SerializedArgs
 
-        self:Communicate("QueueLog", Data)
+            self:Communicate("QueueLog", Data)
+        end, debug.traceback)
+
+        if not Ok then
+            DebugLog("QueueLog error:", Err)
+        end
     end)
 end
 
@@ -307,17 +340,21 @@ function Module:AddTypeCallbacks(Types: table)
     end
 end
 
---// ИЗМЕНЕНО: Event теперь читается через ChannelIndex (UserData-каналы Actors
---// могут быть не Instance) + nil-guard, если канал не получен
 function Module:CreateChannel(): number
     local ChannelID, Event = self:CreateCommChannel()
 
     --// Connect GetCommCallback function
     local ConnectedEvent = self:ChannelIndex(Event, "Event")
     ConnectedEvent:Connect(function(Type: string, ...)
-        local Callback = self:GetCommCallback(Type)
-        if Callback then
-            Callback(...)
+        local Ok, Err = xpcall(function()
+            local Callback = self:GetCommCallback(Type)
+            if Callback then
+                Callback(...)
+            end
+        end, debug.traceback)
+
+        if not Ok then
+            DebugLog("CommCallback error (" .. tostring(Type) .. "):", Err)
         end
     end)
 

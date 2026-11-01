@@ -92,6 +92,17 @@ local TextFont = Font.fromEnum(Enum.Font.Code)
 local FontSuccess = false
 local CommChannel
 
+--// Файл отладки: ошибки UI пишутся на диск, чтобы не нужно было
+--// копировать из GUI, когда GUI залагало
+local DebugFile = "SigmaSpy-debug.log"
+local function DebugLog(...)
+    local Parts = {}
+    for _, Value in {...} do
+        table.insert(Parts, tostring(Value))
+    end
+    pcall(appendfile, DebugFile, os.date("%X") .. " | " .. table.concat(Parts, " ") .. "\n")
+end
+
 function Ui:Init(Data)
     local Modules = Data.Modules
 
@@ -1314,14 +1325,27 @@ function Ui:QueueLog(Data)
     table.insert(LogQueue, Data)
 end
 
+--// Максимум логов за один тик: без этого GUI строит по элементу
+--// на каждый перехваченный вызов и главный поток захлёбывается
+local MaxLogsPerFrame = 10
+
 function Ui:ProcessLogQueue()
 	local Queue = self.LogQueue
     if #Queue <= 0 then return end
 
-	--// Create a log element for each in the Queue
-    for Index, Data in next, Queue do
-        self:CreateLog(Data)
-        table.remove(Queue, Index)
+	--// Берём из головы очереди (старый вариент remove-while-iterate
+	--// через next пропускал элементы)
+    for _ = 1, math.min(#Queue, MaxLogsPerFrame) do
+        local Data = table.remove(Queue, 1)
+        if not Data then break end
+
+		local Ok, Err = xpcall(function()
+			self:CreateLog(Data)
+		end, debug.traceback)
+
+		if not Ok then
+			DebugLog("CreateLog error:", Err)
+		end
     end
 end
 

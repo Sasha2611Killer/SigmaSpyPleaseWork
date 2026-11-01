@@ -21,7 +21,25 @@ local MaxQueueSize = 200
 --// Файл отладки: ошибки пишутся на диск, чтобы не нужно было копировать
 --// из GUI, когда GUI залагало
 local DebugFile = "SigmaSpy-debug.log"
+--// Лимиты: файловый IO в главном потоке сам по себе лагает,
+--// поэтому не более 5 записей/сек и 300 строк на сессию
+local DebugRate = {Count = 0, Window = tick()}
+local DebugLines = 0
+local MaxDebugLines = 300
+
 local function DebugLog(...)
+    if DebugLines >= MaxDebugLines then return end
+
+    local Now = tick()
+    if Now - DebugRate.Window < 1 then
+        DebugRate.Count += 1
+        if DebugRate.Count > 5 then return end
+    else
+        DebugRate.Count = 1
+        DebugRate.Window = Now
+    end
+    DebugLines += 1
+
     local Parts = {}
     for _, Value in {...} do
         table.insert(Parts, tostring(Value))

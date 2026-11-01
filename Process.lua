@@ -411,12 +411,40 @@ function Process:GetScriptFromFunc(Func: (...any) -> ...any)
     if not Func then return end
 
     local Success, ENV = pcall(getfenv, Func)
-    if not Success then return end
+    if Success then
+        --// Blacklist sigma spy
+        if not self:IsSigmaSpyENV(ENV) then
+            local Script = rawget(ENV, "script")
+            if typeof(Script) == "Instance" then
+                return Script
+            end
+        end
+    end
 
-    --// Blacklist sigma spy
-    if self:IsSigmaSpyENV(ENV) then return end
+    --// Fallback: env без "script" (loadstring/обёртки). Имя чанка функции
+    --// в Roblox равно GetFullName скрипта — ищем инстанс по точному совпадению.
+    local SourceOk, Source = pcall(debug.info, Func, "s")
+    if SourceOk and type(Source) == "string" and Source ~= "[C]" and #Source > 0 then
+        local TargetName = Source:match("[%w_]+$")
+        if TargetName then
+            local Ok, Result = pcall(function()
+                for _, Desc in game:GetDescendants() do
+                    if Desc.Name == TargetName
+                        and Desc:IsA("LuaSourceContainer")
+                        and Desc:GetFullName() == Source
+                    then
+                        return Desc
+                    end
+                end
+                return nil
+            end)
+            if Ok and Result then
+                return Result
+            end
+        end
+    end
 
-    return rawget(ENV, "script")
+    return
 end
 
 function Process:ConnectionIsValid(Connection: table): boolean

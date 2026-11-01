@@ -63,6 +63,7 @@ local Config
 local Hook
 local ParserModule
 local Flags
+local Communication
 local ThisScript = script
 
 local function Merge(Base: table, New: table?)
@@ -80,6 +81,7 @@ function Generation:Init(Data: table)
 	Config = Modules.Config
 	Hook = Modules.Hook
 	Flags = Modules.Flags
+	Communication = Modules.Communication
 	
 	--// Import parser
 	local ParserUrl = Configuration.ParserUrl
@@ -331,7 +333,18 @@ function Generation:RemoteScript(Module, Data: RemoteData, ScriptType: string): 
 	})
 
 	if IsNilParent then
-		local DebugId = Communication:GetDebugId(Remote)
+		--// GetDebugId: через Communication, с fallback на прямой вызов
+		local DebugId = nil
+		if Communication and Communication.GetDebugId then
+			DebugId = Communication:GetDebugId(Remote)
+		end
+		if not DebugId then
+			local Ok, Result = pcall(function()
+				return Remote:GetDebugId()
+			end)
+			DebugId = Ok and Result or "0"
+		end
+
 		local Name = Hook:Index(Remote, "Name")
 
 		--// Экранирование кавычек и слэшей

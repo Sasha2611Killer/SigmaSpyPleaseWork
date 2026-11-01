@@ -346,12 +346,14 @@ function Module:CreateChannel(): number
     --// Connect GetCommCallback function
     local ConnectedEvent = self:ChannelIndex(Event, "Event")
     ConnectedEvent:Connect(function(Type: string, ...)
-        local Ok, Err = xpcall(function()
+        --// xpcall вызывается с аргументами: внутренняя функция — vararg,
+        --// иначе "Cannot use '...' outside of a vararg function"
+        local Ok, Err = xpcall(function(...)
             local Callback = self:GetCommCallback(Type)
             if Callback then
                 Callback(...)
             end
-        end, debug.traceback)
+        end, debug.traceback, ...)
 
         if not Ok then
             DebugLog("CommCallback error (" .. tostring(Type) .. "):", Err)

@@ -104,10 +104,12 @@ local InstanceCreatedRemotes: typeof(setmetatable({} :: {[Event]: true}, {__mode
 
 --// Антиспам (порт поведения Cobalt Log:IsOverSpamThreshold):
 --// remote с >Threshold вызовами за Window секунд автоигнорируется в логах.
---// Отключается флагом Config.AutoIgnoreSpam = false.
+--// Плюс ГЛОБАЛЬНЫЙ лимит: суммарно >GlobalSpamThreshold логов/сек — режим перегруза,
+--// в котором пропускается и дорогой сбор caller-info.
+--// Настройки: Config.AutoIgnoreSpam = false (выкл), Config.SpamThreshold,
+--// Config.SpamWindow, Config.GlobalSpamThreshold.
 local SpamCounts = setmetatable({}, {__mode = "k"})
-local SpamThreshold = 15
-local SpamWindow = 1
+local GlobalSpam = {Count = 0, Window = tick()}
 
 --// Runtime-тесты фич (порт идеи Cobalt ExecutorSupport)
 local FeatureTests = {
@@ -635,16 +637,29 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         self:Merge(Data, ExtraData)
     end
 
-    --// Get caller information (IsReceive этот код не выполняет —
-    --// поэтому входящие работали, а исходящие зависали в старой версии)
-    if not IsReceive then
+    --// Лимиты (читаются из Config каждый раз — можно менять на лету)
+    local SpamThreshold = Config.SpamThreshold or 15
+    local SpamWindow = Config.SpamWindow or 1
+    local GlobalSpamThreshold = Config.GlobalSpamThreshold or 60
+
+    --// Глобальный счётчик
+    local Now = tick()
+    if Now - GlobalSpam.Window >= 1 then
+        GlobalSpam.Count = 0
+        GlobalSpam.Window = Now
+    end
+    GlobalSpam.Count += 1
+    local Overloaded = GlobalSpam.Count > GlobalSpamThreshold
+
+    --// Get caller information. В режиме перегруза пропускаем дорогой
+    --// разбор стека (32 pcall debug.info на каждый вызов).
+    if not IsReceive and not Overloaded then
         CallingFunction = self:FindCallingLClosure(6)
         SourceScript = CallingFunction and self:GetScriptFromFunc(CallingFunction) or nil
     end
 
     --// ИЗМЕНЕНО: антиспам (порт Cobalt Log:IsOverSpamThreshold).
     --// Remote при этом ВЫПОЛНЯЕТСЯ (через ProcessCallback), подавляется только лог.
-    local Now = tick()
     local Spam = SpamCounts[Remote]
     if not Spam then
         Spam = {Count = 0, Window = Now}
@@ -656,7 +671,7 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     end
     Spam.Count += 1
 
-    if Spam.Count > SpamThreshold and Config.AutoIgnoreSpam ~= false then
+    if Config.AutoIgnoreSpam ~= false and (Spam.Count > SpamThreshold or Overloaded) then
         if Spam.Count == SpamThreshold + 1 then
             pcall(function()
                 local Name = select(2, pcall(Hook.Index, Hook, Remote, "Name"))

@@ -348,20 +348,26 @@ function Process:FindCallingLClosure(Offset: number)
     local Getfenv = Hook:GetOriginalFunc(getfenv)
     Offset += 1
 
-    while true do
-        Offset += 1
+    --// ЕДИНСТВЕННОЕ ИЗМЕНЕНИЕ (минимальный патч):
+    --// старая версия при выходе за границу стека делала continue
+    --// и уходила в бесконечный цикл — исходящие вызовы зависали.
+    --// Теперь: break при конце стека + лимит 64 фрейма + безопасный
+    --// обход C-функций через pcall. Логика поиска не изменилась.
+    for Level = Offset + 1, Offset + 64 do
+        --// Конец стека — выходим (НЕ continue)
+        if debug.info(Level, "l") == -1 then break end
 
-        --// Check if the stack level is valid
-        local IsValid = debug.info(Offset, "l") ~= -1
-        if not IsValid then continue end
-
-        --// Check if the function is valid
-        local Function = debug.info(Offset, "f")
+        local Function = debug.info(Level, "f")
         if not Function then return end
-        if Getfenv(Function) == SigmaENV then continue end
+
+        local Success, Env = pcall(Getfenv, Function)
+        if not Success then continue end
+        if Env == SigmaENV then continue end
 
         return Function
     end
+
+    return nil
 end
 
 function Process:Decompile(Script: LocalScript | ModuleScript): string

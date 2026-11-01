@@ -14,41 +14,6 @@ CommWrapper.__index = CommWrapper
 local SerializeCache = setmetatable({}, {__mode = "k"})
 local DeserializeCache = setmetatable({}, {__mode = "k"})
 
---// Предел очереди: при флуде дропаем новые пакеты, а не копим бесконечно
---// (переполненная очередь = захламление главного потока = залипание GUI)
-local MaxQueueSize = 200
-
---// Файл отладки: ошибки пишутся на диск, чтобы не нужно было копировать
---// из GUI, когда GUI залагало
-local DebugFile = "SigmaSpy-debug.log"
---// Лимиты: файловый IO в главном потоке сам по себе лагает,
---// поэтому не более 5 записей/сек и 300 строк на сессию
-local DebugRate = {Count = 0, Window = tick()}
-local DebugLines = 0
-local MaxDebugLines = 300
-
-local function DebugLog(...)
-    if DebugLines >= MaxDebugLines then return end
-
-    local Now = tick()
-    if Now - DebugRate.Window < 1 then
-        DebugRate.Count += 1
-        if DebugRate.Count > 5 then return end
-    else
-        DebugRate.Count = 1
-        DebugRate.Window = Now
-    end
-    DebugLines += 1
-
-    local Parts = {}
-    for _, Value in {...} do
-        table.insert(Parts, tostring(Value))
-    end
-
-    local Line = os.date("%X") .. " | " .. table.concat(Parts, " ") .. "\n"
-    pcall(appendfile, DebugFile, Line)
-end
-
 --// Services
 local CoreGui
 
@@ -57,22 +22,6 @@ local Hook
 local Channel
 local Config
 local Process
-
---// ИЗМЕНЕНО: native comm-функции ищутся сначала в библиотеке Actors,
---// затем в легаси-глобалах (старые executor'ы).
-local function GetNativeCommFuncs()
-    --// Современная библиотека Actors
-    if typeof(Actors) == "table" then
-        local Create = Actors.create_comm_channel
-        local Get = Actors.get_comm_channel
-        if typeof(Create) == "function" and typeof(Get) == "function" then
-            return Create, Get
-        end
-    end
-
-    --// Легаси-глобалы (xAPI-style)
-    return create_comm_channel, get_comm_channel
-end
 
 function Module:Init(Data)
     local Modules = Data.Modules
@@ -86,16 +35,10 @@ end
 
 function CommWrapper:Fire(...)
     local Queue = self.Queue
-
-    --// При переполнении дропаем пакет: лучше потерять лог, чем заморозить UI
-    if #Queue >= MaxQueueSize then
-        return
-    end
-
     table.insert(Queue, {...})
 end
 
-function CommWrapper:ProcessArguments(Arguments)
+function CommWrapper:ProcessArguments(Arguments) 
     local Channel = self.Channel
     Channel:Fire(Process:Unpack(Arguments))
 end
@@ -103,16 +46,11 @@ end
 function CommWrapper:ProcessQueue()
     local Queue = self.Queue
 
-    for _ = 1, #Queue do
-        local Arguments = table.remove(Queue, 1)
-        if Arguments == nil then break end
-
-        local Ok, Err = pcall(function()
-            self:ProcessArguments(Arguments)
+    for Index = 1, #Queue do
+        local Arguments = table.remove(Queue)
+        pcall(function()
+            self:ProcessArguments(Arguments) 
         end)
-        if not Ok then
-            DebugLog("CommWrapper error:", Err)
-        end
     end
 end
 
@@ -163,16 +101,11 @@ function Module:GetHiddenParent(): Instance
     return CoreGui
 end
 
-function Module:CreateCommChannel(): (number, any)
-    --// Use native if it exists (Actors library → legacy globals)
+function Module:CreateCommChannel(): (number, BindableEvent)
+    --// Use native if it exists
     local Force = Config.ForceUseCustomComm
-    local CreateComm = select(1, GetNativeCommFuncs())
-
-    if CreateComm and not Force then
-        local Success, ChannelId, Channel = pcall(CreateComm)
-        if Success and Channel then
-            return ChannelId, Channel
-        end
+    if create_comm_channel and not Force then
+        return create_comm_channel()
     end
 
     local Parent = self:GetHiddenParent()
@@ -185,23 +118,16 @@ function Module:CreateCommChannel(): (number, any)
     return ChannelId, Channel
 end
 
-function Module:GetCommChannel(ChannelId: number): (any, boolean)
-    --// Use native if it exists (Actors library → legacy globals)
+function Module:GetCommChannel(ChannelId: number): BindableEvent?
+    --// Use native if it exists
     local Force = Config.ForceUseCustomComm
-    local _, GetComm = GetNativeCommFuncs()
-
-    if GetComm and not Force then
-        local Success, NativeChannel = pcall(GetComm, ChannelId)
-        if Success and NativeChannel then
-            return NativeChannel, false
-        end
+    if get_comm_channel and not Force then
+        local Channel = get_comm_channel(ChannelId)
+        return Channel, false
     end
 
     local Parent = self:GetHiddenParent()
     local Channel = Parent:FindFirstChild(ChannelId)
-
-    --// Канал не найден (например, ещё не создан актором)
-    if not Channel then return nil, false end
 
     --// Wrap the channel (Prevents thread permission errors)
     local Wrapped = self:NewCommWrap(Channel)
@@ -210,10 +136,10 @@ end
 
 function Module:CheckValue(Value, Inbound: boolean?)
      --// No serializing  needed
-    if typeof(Value) ~= "table" then
-        return Value
+    if typeof(Value) ~= "table" then 
+        return Value 
     end
-
+   
     --// Deserialize
     if Inbound then
         return self:DeserializeTable(Value)
@@ -227,7 +153,7 @@ local Tick = 0
 function Module:WaitCheck()
     Tick += 1
     if Tick > 40 then
-        Tick = 0
+        Tick = 0 -- I could use modulus here but the interger will be massive
         wait()
     end
 end
@@ -235,14 +161,14 @@ end
 function Module:MakePacket(Index, Value): table
     self:WaitCheck()
     return {
-        Index = self:CheckValue(Index),
+        Index = self:CheckValue(Index), 
         Value = self:CheckValue(Value)
     }
 end
 
 function Module:ReadPacket(Packet: table): (any, any)
     if typeof(Packet) ~= "table" then return Packet end
-
+    
     local Key = self:CheckValue(Packet.Index, true)
     local Value = self:CheckValue(Packet.Value, true)
     self:WaitCheck()
@@ -273,7 +199,7 @@ function Module:DeserializeTable(Serialized: table): table
 
     local Table = {}
     DeserializeCache[Serialized] = Table
-
+    
     for _, Packet in next, Serialized do
         local Index, Value = self:ReadPacket(Packet)
         if Index == nil then continue end
@@ -289,26 +215,15 @@ function Module:SetChannel(NewChannel: number)
 end
 
 function Module:ConsolePrint(...)
-    local Ok, Err = pcall(self.Communicate, self, "Print", ...)
-    if not Ok then
-        DebugLog("ConsolePrint error:", Err)
-    end
+    self:Communicate("Print", ...)
 end
 
---// ИЗМЕНЕНО: xpcall + запись ошибки в файл. Если GUI залагало, ошибки
---// всё равно можно прочитать из workspace-файла SigmaSpy-debug.log
 function Module:QueueLog(Data)
-    task.spawn(function()
-        local Ok, Err = xpcall(function()
-            local SerializedArgs = self:SerializeTable(Data.Args)
-            Data.Args = SerializedArgs
+    spawn(function()
+        local SerializedArgs = self:SerializeTable(Data.Args)
+        Data.Args = SerializedArgs
 
-            self:Communicate("QueueLog", Data)
-        end, debug.traceback)
-
-        if not Ok then
-            DebugLog("QueueLog error:", Err)
-        end
+        self:Communicate("QueueLog", Data)
     end)
 end
 
@@ -362,19 +277,10 @@ function Module:CreateChannel(): number
     local ChannelID, Event = self:CreateCommChannel()
 
     --// Connect GetCommCallback function
-    local ConnectedEvent = self:ChannelIndex(Event, "Event")
-    ConnectedEvent:Connect(function(Type: string, ...)
-        --// xpcall вызывается с аргументами: внутренняя функция — vararg,
-        --// иначе "Cannot use '...' outside of a vararg function"
-        local Ok, Err = xpcall(function(...)
-            local Callback = self:GetCommCallback(Type)
-            if Callback then
-                Callback(...)
-            end
-        end, debug.traceback, ...)
-
-        if not Ok then
-            DebugLog("CommCallback error (" .. tostring(Type) .. "):", Err)
+    Event.Event:Connect(function(Type: string, ...)
+        local Callback = self:GetCommCallback(Type)
+        if Callback then
+            Callback(...)
         end
     end)
 

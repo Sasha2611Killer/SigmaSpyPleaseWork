@@ -218,12 +218,40 @@ function Module:ConsolePrint(...)
     self:Communicate("Print", ...)
 end
 
-function Module:QueueLog(Data)
-    spawn(function()
-        local SerializedArgs = self:SerializeTable(Data.Args)
-        Data.Args = SerializedArgs
+--// Батчинг (Cobalt-style): один поток-флашер вместо spawn() на каждый лог.
+--// При флуде это убирает тысячи короткоживущих тредов и даёт точку
+--// троттлинга (task.wait каждые N логов).
+local LogQueue = {}
+local LogFlushing = false
 
-        self:Communicate("QueueLog", Data)
+function Module:QueueLog(Data)
+    table.insert(LogQueue, Data)
+
+    if LogFlushing then return end
+    LogFlushing = true
+
+    task.spawn(function()
+        local Count = 0
+        while #LogQueue > 0 do
+            local Item = table.remove(LogQueue, 1)
+            if Item then
+                local Ok, Err = pcall(function()
+                    local SerializedArgs = self:SerializeTable(Item.Args)
+                    Item.Args = SerializedArgs
+                    self:Communicate("QueueLog", Item)
+                end)
+
+                if not Ok then
+                    warn("SigmaSpy QueueLog:", Err)
+                end
+
+                Count += 1
+                if Count % 25 == 0 then
+                    task.wait()
+                end
+            end
+        end
+        LogFlushing = false
     end)
 end
 

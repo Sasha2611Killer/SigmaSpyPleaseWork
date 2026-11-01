@@ -23,6 +23,22 @@ local Channel
 local Config
 local Process
 
+--// ИЗМЕНЕНО: native comm-функции ищутся сначала в библиотеке Actors,
+--// затем в легаси-глобалах (старые executor'ы).
+local function GetNativeCommFuncs()
+    --// Современная библиотека Actors
+    if typeof(Actors) == "table" then
+        local Create = Actors.create_comm_channel
+        local Get = Actors.get_comm_channel
+        if typeof(Create) == "function" and typeof(Get) == "function" then
+            return Create, Get
+        end
+    end
+
+    --// Легаси-глобалы (xAPI-style)
+    return create_comm_channel, get_comm_channel
+end
+
 function Module:Init(Data)
     local Modules = Data.Modules
     local Services = Data.Services
@@ -38,18 +54,22 @@ function CommWrapper:Fire(...)
     table.insert(Queue, {...})
 end
 
-function CommWrapper:ProcessArguments(Arguments) 
+function CommWrapper:ProcessArguments(Arguments)
     local Channel = self.Channel
     Channel:Fire(Process:Unpack(Arguments))
 end
 
+--// ИЗМЕНЕНО: элементы обрабатываются в порядке очереди (remove(Queue, 1))
+--// вместо перевёрнутого порядка table.remove(Queue) с фиксированной границей
 function CommWrapper:ProcessQueue()
     local Queue = self.Queue
 
-    for Index = 1, #Queue do
-        local Arguments = table.remove(Queue)
+    for _ = 1, #Queue do
+        local Arguments = table.remove(Queue, 1)
+        if Arguments == nil then break end
+
         pcall(function()
-            self:ProcessArguments(Arguments) 
+            self:ProcessArguments(Arguments)
         end)
     end
 end
@@ -101,11 +121,17 @@ function Module:GetHiddenParent(): Instance
     return CoreGui
 end
 
-function Module:CreateCommChannel(): (number, BindableEvent)
-    --// Use native if it exists
+function Module:CreateCommChannel(): (number, any)
+    --// Use native if it exists (Actors library → legacy globals)
     local Force = Config.ForceUseCustomComm
-    if create_comm_channel and not Force then
-        return create_comm_channel()
+    local CreateComm = select(1, GetNativeCommFuncs())
+
+    if CreateComm and not Force then
+        local Success, ChannelId, Channel = pcall(CreateComm)
+        if Success and Channel then
+            return ChannelId, Channel
+        end
+        --// Native не сработал — падаем в кастомный путь ниже
     end
 
     local Parent = self:GetHiddenParent()
@@ -118,16 +144,24 @@ function Module:CreateCommChannel(): (number, BindableEvent)
     return ChannelId, Channel
 end
 
-function Module:GetCommChannel(ChannelId: number): BindableEvent?
-    --// Use native if it exists
+function Module:GetCommChannel(ChannelId: number): (any, boolean)
+    --// Use native if it exists (Actors library → legacy globals)
     local Force = Config.ForceUseCustomComm
-    if get_comm_channel and not Force then
-        local Channel = get_comm_channel(ChannelId)
-        return Channel, false
+    local _, GetComm = GetNativeCommFuncs()
+
+    if GetComm and not Force then
+        local Success, NativeChannel = pcall(GetComm, ChannelId)
+        if Success and NativeChannel then
+            return NativeChannel, false
+        end
+        --// Native не сработал — падаем в кастомный путь ниже
     end
 
     local Parent = self:GetHiddenParent()
     local Channel = Parent:FindFirstChild(ChannelId)
+
+    --// Канал не найден (например, ещё не создан актором)
+    if not Channel then return nil, false end
 
     --// Wrap the channel (Prevents thread permission errors)
     local Wrapped = self:NewCommWrap(Channel)
@@ -136,10 +170,10 @@ end
 
 function Module:CheckValue(Value, Inbound: boolean?)
      --// No serializing  needed
-    if typeof(Value) ~= "table" then 
-        return Value 
+    if typeof(Value) ~= "table" then
+        return Value
     end
-   
+
     --// Deserialize
     if Inbound then
         return self:DeserializeTable(Value)
@@ -161,14 +195,14 @@ end
 function Module:MakePacket(Index, Value): table
     self:WaitCheck()
     return {
-        Index = self:CheckValue(Index), 
+        Index = self:CheckValue(Index),
         Value = self:CheckValue(Value)
     }
 end
 
 function Module:ReadPacket(Packet: table): (any, any)
     if typeof(Packet) ~= "table" then return Packet end
-    
+
     local Key = self:CheckValue(Packet.Index, true)
     local Value = self:CheckValue(Packet.Value, true)
     self:WaitCheck()
@@ -199,7 +233,7 @@ function Module:DeserializeTable(Serialized: table): table
 
     local Table = {}
     DeserializeCache[Serialized] = Table
-    
+
     for _, Packet in next, Serialized do
         local Index, Value = self:ReadPacket(Packet)
         if Index == nil then continue end
@@ -273,11 +307,14 @@ function Module:AddTypeCallbacks(Types: table)
     end
 end
 
+--// ИЗМЕНЕНО: Event теперь читается через ChannelIndex (UserData-каналы Actors
+--// могут быть не Instance) + nil-guard, если канал не получен
 function Module:CreateChannel(): number
     local ChannelID, Event = self:CreateCommChannel()
 
     --// Connect GetCommCallback function
-    Event.Event:Connect(function(Type: string, ...)
+    local ConnectedEvent = self:ChannelIndex(Event, "Event")
+    ConnectedEvent:Connect(function(Type: string, ...)
         local Callback = self:GetCommCallback(Type)
         if Callback then
             Callback(...)

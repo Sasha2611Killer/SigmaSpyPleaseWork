@@ -1040,6 +1040,14 @@ function Ui:SetFocusedRemote(Data)
 	function Data:Decompile(WhichScript: string)
 		local DecompilePopout = Flags:GetFlagValue("DecompilePopout")
 		local ToDecompile = Data[WhichScript]
+
+		--// Fallback: SourceScript часто nil (env вызывающего closure без
+		--// глобала "script") — getscriptbytecode(nil) тогда падает с
+		--// "Failed to get script bytecode". Пробуем CallingScript.
+		if not ToDecompile and WhichScript == "SourceScript" then
+			ToDecompile = Data.CallingScript
+		end
+
 		local Editor = CodeEditor
 
 		--// Problem check

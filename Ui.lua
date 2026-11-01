@@ -1038,6 +1038,16 @@ function Ui:SetFocusedRemote(Data)
 		SetIDEText(Script, `Advanced Info for: {RemoteName}`)
 	end
 	function Data:Decompile(WhichScript: string)
+		--// Receive: у события нет одного скрипта, но обработчики видны
+		--// через getconnections — открываем список соединений с Decompile
+		--// для каждого (Cobalt-style attribution)
+		if IsReceive then
+			local RecvMethod = ClassData.Receive[1]
+			local Signal = Hook:Index(Remote, RecvMethod)
+			Ui:ViewConnections(RemoteName, Signal)
+			return
+		end
+
 		local DecompilePopout = Flags:GetFlagValue("DecompilePopout")
 		local ToDecompile = Data[WhichScript]
 

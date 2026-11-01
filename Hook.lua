@@ -1,8 +1,14 @@
 --!nolint DeprecatedApi
 
 --[[
-	Taking my methods 💖💖
-	I love a paster and a skid, puts disgust in my face
+	Обновлённый модуль Hook.
+	Что изменено:
+	- Capability detection: oth и библиотека Actors используются автоматически, если существуют
+	- Hook:HookFunction — использует oth.hook при наличии (с фоллбэком на hookfunction)
+	- Hook:UnhookFunction — снятие хуков через oth.unhook / restorefunction
+	- Hook:IsOthThread / Hook:HasOth / Hook:HasNewActors / Hook:GetCapabilities
+	- Hook:RunOnActors — подписывается на on_actor_state_created (акторы, созданные позже)
+	- Все хуки кэшируют оригинал в PreviousFunctions
 ]]
 
 local Hook = {
@@ -30,8 +36,39 @@ local Communication
 
 local ExeENV = getfenv(1)
 
+--// Capability detection — выполняется один раз при загрузке.
+--// oth / Actors могут отсутствовать в окружении: обращение к ним безопасно (nil).
+local Capabilities = {
+	Oth = typeof(oth) == "table"
+		and typeof(oth.hook) == "function"
+		and typeof(oth.get_root_callback) == "function",
+	NewActors = typeof(Actors) == "table"
+		and typeof(Actors.run_on_actor) == "function"
+		and typeof(Actors.getactors) == "function",
+}
+
+function Hook:HasOth(): boolean
+	return Capabilities.Oth
+end
+
+function Hook:HasNewActors(): boolean
+	return Capabilities.NewActors
+end
+
+function Hook:GetCapabilities(): table
+	return Capabilities
+end
+
+--// True, если текущий код выполняется внутри oth-хука (oth исполняет
+--// callback на отдельном треде — это важно для разбора стека вызовов)
+function Hook:IsOthThread(): boolean
+	if not Capabilities.Oth then return false end
+	if typeof(oth.is_hook_thread) ~= "function" then return false end
+	return oth.is_hook_thread() or false
+end
+
 function Hook:Init(Data)
-    Modules = Data.Modules
+	Modules = Data.Modules
 
 	Process = Modules.Process
 	Communication = Modules.Communication or Communication
@@ -69,22 +106,22 @@ local function Merge(Base: table, New: table)
 end
 
 function Hook:Index(Object: Instance, Key: string)
-    local identity = getthreadidentity()
-    setthreadidentity(8)
-    local returned = Object[Key]
-    setthreadidentity(identity)
+	local identity = getthreadidentity()
+	setthreadidentity(8)
+	local returned = Object[Key]
+	setthreadidentity(identity)
 	return returned
 end
 
 function Hook:PushConfig(Overwrites)
-    Merge(self, Overwrites)
+	Merge(self, Overwrites)
 end
 
 --// getrawmetatable
 function Hook:ReplaceMetaMethod(Object: Instance, Call: string, Callback: MetaFunc): MetaFunc
 	local Metatable = getrawmetatable(Object)
 	local OriginalFunc = clonefunction(Metatable[Call])
-	
+
 	--// Replace function
 	setreadonly(Metatable, false)
 	Metatable[Call] = newcclosure(function(...)
@@ -95,21 +132,56 @@ function Hook:ReplaceMetaMethod(Object: Instance, Call: string, Callback: MetaFu
 	return OriginalFunc
 end
 
---// hookfunction
+--// hookfunction / oth.hook — выбирается автоматически по capability detection.
+--// Семантика возврата идентична: возвращается оригинал функции.
 function Hook:HookFunction(Func: UnkFunc, Callback: UnkFunc)
-	local OriginalFunc
 	local WrappedCallback = newcclosure(Callback)
+
+	--// Современный путь: oth (C-closure хуки, root callback, unhook)
+	if Capabilities.Oth then
+		local OriginalFunc
+		oth.hook(Func, function(...)
+			return HookMiddle(OriginalFunc, WrappedCallback, false, ...)
+		end)
+		OriginalFunc = oth.get_root_callback(Func)
+
+		--// Кэшируем оригинал (раньше кэшировалось только в PatchFunctions)
+		self.PreviousFunctions[Func] = OriginalFunc
+		return OriginalFunc
+	end
+
+	--// Классический путь
+	local OriginalFunc
 	OriginalFunc = clonefunction(hookfunction(Func, function(...)
 		return HookMiddle(OriginalFunc, WrappedCallback, false, ...)
 	end))
+	self.PreviousFunctions[Func] = OriginalFunc
 	return OriginalFunc
+end
+
+--// Снятие хука. Раньше такой возможности не было вовсе.
+--// Возвращает true, если удалось снять.
+function Hook:UnhookFunction(Func: UnkFunc): boolean
+	if Capabilities.Oth and typeof(oth.unhook) == "function" then
+		oth.unhook(Func)
+		self.PreviousFunctions[Func] = nil
+		return true
+	end
+
+	if typeof(restorefunction) == "function" then
+		restorefunction(Func)
+		self.PreviousFunctions[Func] = nil
+		return true
+	end
+
+	return false
 end
 
 --// hookmetamethod
 function Hook:HookMetaCall(Object: Instance, Call: string, Callback: MetaFunc): MetaFunc
 	local Metatable = getrawmetatable(Object)
 	local Unhooked
-	
+
 	Unhooked = self:HookFunction(Metatable[Call], function(...)
 		return HookMiddle(Unhooked, Callback, true, ...)
 	end)
@@ -118,12 +190,12 @@ end
 
 function Hook:HookMetaMethod(Object: Instance, Call: string, Callback: MetaFunc): MetaFunc
 	local Func = newcclosure(Callback)
-	
+
 	--// Getrawmetatable
 	if Config.ReplaceMetaCallFunc then
 		return self:ReplaceMetaMethod(Object, Call, Func)
 	end
-	
+
 	--// Hookmetamethod
 	return self:HookMetaCall(Object, Call, Func)
 end
@@ -138,6 +210,8 @@ function Hook:PatchFunctions()
 	local Patches = {
 		--// Error detection patch
 		--// hookfunction may still be detected depending on the executor
+		--// ПРИМЕЧАНИЕ: с oth сигнатуры "C stack overflow" могут отличаться —
+		--// патч всё равно срабатывает, но строку ошибки стоит проверить на твоём executor'е
 		[pcall] =  function(OldFunc, Func, ...)
 			local Responce = {OldFunc(Func, ...)}
 			local Success, Error = Responce[1], Responce[2]
@@ -200,13 +274,39 @@ function Hook:GetOriginalFunc(Func)
 	return self.PreviousFunctions[Func] or Func
 end
 
+--// Запуск кода на акторах.
+--// Современный путь (Actors): хук текущих акторов + подписка на вновь созданные.
+--// Legacy путь: разовый проход по getactors().
 function Hook:RunOnActors(Code: string, ChannelId: number)
+	if Capabilities.NewActors then
+		local function HookAllActors()
+			local ActorList = Actors.getactors()
+			if not ActorList then return end
+
+			for _, Actor in next, ActorList do
+				pcall(Actors.run_on_actor, Actor, Code, ChannelId)
+			end
+		end
+
+		--// Текущие акторы
+		HookAllActors()
+
+		--// Акторы, созданные ПОЗЖЕ (в legacy-варианте это было упущено)
+		local Signal = Actors.on_actor_state_created
+		if typeof(Signal) == "RBXScriptSignal" then
+			Signal:Connect(HookAllActors)
+		end
+
+		return
+	end
+
+	--// Legacy путь
 	if not getactors or not run_on_actor then return end
-	
-	local Actors = getactors()
-	if not Actors then return end
-	
-	for _, Actor in Actors do 
+
+	local ActorsList = getactors()
+	if not ActorsList then return end
+
+	for _, Actor in ActorsList do
 		pcall(run_on_actor, Actor, Code, ChannelId)
 	end
 end
@@ -231,7 +331,7 @@ function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
 	--// Addionally, this is for __index calls.
 	--// 	A __namecall hook will not detect this
 	OriginalFunc = self:HookFunction(Func, function(self, ...)
-		--// Check if the Object is allowed 
+		--// Check if the Object is allowed
 		if not Process:RemoteAllowed(self, "Send", FuncName) then return end
 
 		--// Process the remote data
@@ -272,7 +372,7 @@ function Hook:HookClientInvoke(Remote, Method, Callback)
 	--// Some executors like Potassium will throw a error if the Callback value is nil
 	if not Success then return end
 	if not Function then return end
-	
+
 	--// Test hookfunction
 	local HookSuccess = pcall(function()
 		self:HookFunction(Function, Callback)
@@ -297,27 +397,27 @@ function Hook:ConnectClientRecive(Remote)
 	if not Allowed then return end
 
 	--// Check if the Object has Remote class data
-    local ClassData = Process:GetClassData(Remote)
-    local IsRemoteFunction = ClassData.IsRemoteFunction
+	local ClassData = Process:GetClassData(Remote)
+	local IsRemoteFunction = ClassData.IsRemoteFunction
 	local NoReciveHook = ClassData.NoReciveHook
-    local Method = ClassData.Receive[1]
+	local Method = ClassData.Receive[1]
 
 	--// Check if the Recive should be hooked
 	if NoReciveHook then return end
 
 	--// New callback function
 	local function Callback(...)
-        return Process:ProcessRemote({
-            Method = Method,
-            IsReceive = true,
-            MetaMethod = "Connect",
+		return Process:ProcessRemote({
+			Method = Method,
+			IsReceive = true,
+			MetaMethod = "Connect",
 			IsExploit = checkcaller()
-        }, Remote, ...)
+		}, Remote, ...)
 	end
 
 	--// Connect remote
 	if not IsRemoteFunction then
-   		Remote[Method]:Connect(Callback)
+		Remote[Method]:Connect(Callback)
 	else -- Remote functions
 		self:HookClientInvoke(Remote, Method, Callback)
 	end
@@ -378,7 +478,7 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 			Communication:ConsolePrint("Hooks loaded")
 		end
 	})
-	
+
 	--// Process configuration
 	ProcessLib:SetChannel(Channel, IsWrapped)
 	ProcessLib:SetExtraData(ExtraData)
@@ -398,7 +498,7 @@ function Hook:LoadMetaHooks(ActorCode: string, ChannelId: number)
 	end
 
 	--// Hook current thread
-	self:BeginService(Modules, nil, ChannelId) 
+	self:BeginService(Modules, nil, ChannelId)
 end
 
 function Hook:LoadReceiveHooks()

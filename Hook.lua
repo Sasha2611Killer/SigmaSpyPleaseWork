@@ -30,6 +30,11 @@ local Communication
 
 local ExeENV = getfenv(1)
 
+--// Верификационный токен для разметки собственных колбэков (Cobalt-style):
+--// игровые переборщики getconnections не могут отличить наш логгер,
+--// т.к. токен живёт в env функции и переживает clonefunction.
+local SpyVerificationToken = tostring(tick()) .. "_" .. tostring(math.random(1, 1e6))
+
 function Hook:Init(Data)
     Modules = Data.Modules
 
@@ -200,6 +205,18 @@ function Hook:GetOriginalFunc(Func)
 	return self.PreviousFunctions[Func] or Func
 end
 
+--// Cobalt-style: проверка "это наш логгер?" — реестр по ссылке ИЛИ
+--// env-токен (выживает при clonefunction)
+function Hook:IsSpyConnectionFunction(Function): boolean
+	if not Function then return false end
+	if Process.LogConnectionFunctions[Function] then return true end
+
+	local Success, Env = pcall(getfenv, Function)
+	return Success
+		and typeof(Env) == "table"
+		and rawget(Env, "__SigmaSpyLogger") == SpyVerificationToken
+end
+
 function Hook:RunOnActors(Code: string, ChannelId: number)
 	if not getactors or not run_on_actor then return end
 
@@ -299,9 +316,35 @@ function Hook:HookClientInvoke(Remote, Method, Callback)
 	if HookSuccess then return end
 
 	--// Replace callback function otherwise (скрыт из стека, Cobalt-style)
-	Remote[Method] = HideFromStack(function(...)
+	local Detour = HideFromStack(function(...)
 		return HookMiddle(Function, Callback, false, ...)
 	end)
+
+	--// Cobalt-style: присвоение OnClientInvoke под identity 2 и env
+	--// оригинального колбэка — игровые __newindex-детекты видят "свой"
+	--// вызов (checkcaller() == false), а не executor.
+	local OriginalEnv = {}
+	pcall(function()
+		OriginalEnv = getfenv(Function)
+	end)
+	local OriginalScript = rawget(OriginalEnv, "script")
+	local Trampoline = trampoline_call or (typeof(syn) == "table" and syn.trampoline_call) or nil
+
+	if Trampoline then
+		pcall(Trampoline, function()
+			Remote[Method] = Detour
+		end, {}, {
+			env = OriginalEnv,
+			script = OriginalScript,
+			identity = 2,
+		})
+	else
+		task.spawn(function()
+			setthreadidentity(2)
+			setfenv(0, OriginalEnv)
+			Remote[Method] = Detour
+		end)
+	end
 end
 
 function Hook:MultiConnect(Remotes)
@@ -342,6 +385,19 @@ function Hook:ConnectClientRecive(Remote)
 			IsExploit = checkcaller()
         }, Remote, ...)
 	end)
+
+	--// Env-токен (Cobalt-style): помечаем функцию как свою — токен живёт
+	--// в env и переживает clonefunction, в отличие от реестра по ссылке.
+	local OriginalEnv = getfenv(Callback)
+	setfenv(Callback, setmetatable({
+		["__SigmaSpyLogger"] = SpyVerificationToken,
+	}, {
+		__index = OriginalEnv,
+		__newindex = OriginalEnv,
+	}))
+
+	--// Не показывать собственный колбэк в списке соединений
+	Process.LogConnectionFunctions[Callback] = true
 
 	--// Connect remote
 	if not IsRemoteFunction then

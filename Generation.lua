@@ -486,6 +486,8 @@ function Generation:AdvancedInfo(Module, Data: table): string
 		},
 		["MetaMethod"] = Data.MetaMethod,
 		["IsActor"] = Data.IsActor,
+		--// Диагностика обхода стека (raw debug.info по уровням)
+		["StackProbe"] = Data.StackProbe or "n/a (receive or no probe)",
 	}
 
 	--// Some closures may not be lua

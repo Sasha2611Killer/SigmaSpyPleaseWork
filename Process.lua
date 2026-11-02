@@ -352,28 +352,34 @@ function Process:SetNewReturnSpoofs(NewReturnSpoofs: table)
     ReturnSpoofs = NewReturnSpoofs
 end
 
-function Process:FindCallingLClosure(Offset: number)
+--// ВСЕ не-Sigma и не-C фреймы начиная с Offset (до 4 штук):
+--// [1] — функция, вызвавшая remote (модуль-источник),
+--// [2] — кто вызвал её (загрузчик/вызывающий скрипт).
+function Process:FindCallingClosures(Offset: number): {(...any) -> ...any}
     local Getfenv = Hook:GetOriginalFunc(getfenv)
+    local Result = {}
 
-    --// Старт НИЖЕ Offset: у части executor'ов (Delta) цепочка фреймов
-    --// глубже расчётной, и реальный вызывающий лежит ниже. Лишние
-    --// фреймы (wrapper Sigma-env, C-трамплины) всё равно пропускаются.
-    --// Первый не-Sigma и не-C фрейм — вызывающий игровой код.
     for Level = math.max(1, Offset - 2), Offset + 64 do
         --// Конец стека — выходим (НЕ continue)
         if debug.info(Level, "l") == -1 then break end
 
         local Function = debug.info(Level, "f")
-        if not Function then return end
+        if not Function then break end
 
         local Success, Env = pcall(Getfenv, Function)
         if not Success then continue end
         if Env == SigmaENV then continue end
 
-        return Function
+        table.insert(Result, Function)
+        if #Result >= 4 then break end
     end
 
-    return nil
+    return Result
+end
+
+--// Обратная совместимость: первый (ближайший) вызывающий closure
+function Process:FindCallingLClosure(Offset: number)
+    return self:FindCallingClosures(Offset)[1]
 end
 
 function Process:Decompile(Script: LocalScript | ModuleScript): string
@@ -644,10 +650,15 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         self:Merge(Data, ExtraData)
     end
 
-    --// Get caller information
+    --// Get caller information: [1] = модуль-источник вызова, [2] = загрузчик
+    local CallerScript = nil
     if not IsReceive then
-        CallingFunction = self:FindCallingLClosure(6)
+        local Closures = self:FindCallingClosures(6)
+        CallingFunction = Closures[1]
+        local CallerFunction = Closures[2]
+
         SourceScript = CallingFunction and self:GetScriptFromFunc(CallingFunction) or nil
+        CallerScript = CallerFunction and self:GetScriptFromFunc(CallerFunction) or nil
     end
 
     --// Add to queue
@@ -656,6 +667,7 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
 		CallingScript = getcallingscript(),
         CallingFunction = CallingFunction,
         SourceScript = SourceScript,
+        CallerScript = CallerScript,
         Id = Id,
 		ClassData = ClassData,
         Timestamp = Timestamp,

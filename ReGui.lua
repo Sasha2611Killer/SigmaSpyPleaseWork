@@ -237,7 +237,7 @@ true J.Parent=H local K=o'TextLabel'K.Name='LineNumbers'K.BackgroundTransparency
 TextYAlignment=Enum.TextYAlignment.Top K.ClipsDescendants=true K.RichText=true K
 .Parent=H r.Name='Cursor'r.BackgroundColor3=Color3.fromRGB(220,220,220)r.
 BorderSizePixel=0 r.Parent=H local L=o'TextBox'L.Name='EditBox'L.MultiLine=true
-L.Visible=false L.Parent=H L.TextSize=G.FontSize L.FontFace=G.FontFace C.Invis=j
+L.Visible=true L.BackgroundTransparency=1 L.TextTransparency=1 L.TextColor3=Color3.new(0,0,0) L.PlaceholderColor3=Color3.new(0,0,0) L.ClearTextOnFocus=false L.Position=UDim2.new(1,-2,1,-2)L.Size=UDim2.fromOffset(1,1) L.Parent=H L.TextSize=G.FontSize L.FontFace=G.FontFace C.Invis=j
 :Create(r,TweenInfo.new(0,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),{
 BackgroundTransparency=1})C.Vis=j:Create(r,TweenInfo.new(0,Enum.EasingStyle.
 Quart,Enum.EasingDirection.Out),{BackgroundTransparency=0})local M=o'Frame'M.

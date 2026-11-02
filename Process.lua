@@ -351,15 +351,15 @@ function Process:SetNewReturnSpoofs(NewReturnSpoofs: table)
     ReturnSpoofs = NewReturnSpoofs
 end
 
---// [FIX] ВСЕ не-Sigma и не-C Lua-фреймы, начиная с первого.
---// Теперь: старт с уровня 1, фильтр по [C] ДО getfenv, дедупликация, до 8.
---// [FIX 2026-11-03] getfenv читается под identity 8 (на Delta падает с
---// identity executor'а). ВАЖНО: debug.info звать НАПРЯМУЮ, без pcall —
---// через pcall уровень 1 = сам pcall ([C], l == -1) и обход мгновенно
---// завершается. Probe (опционально): сырые записи по уровням для Caller Info.
-function Process:FindCallingClosures(_Offset: number?, Probe: table?): {(...any) -> ...any}
+--// [FIX] ВСЕ не-Sigma Lua-фреймы + script-хинты с C-фреймов.
+--// Probe v6 (2026-11-03): стек на Delta ДОСТУПЕН. C-фреймы имеют l == -1,
+--// но это НЕ конец стека — идём дальше, пока debug.info(Level,"f") не nil.
+--// C-фреймы в Result не добавляем, но их env.script (скрипт игры =
+--// владелец потока/загрузчик) собираем в Hints по порядку.
+function Process:FindCallingClosures(_Offset: number?, Probe: table?): (table, table)
     local Getfenv = Hook:GetOriginalFunc(getfenv)
     local Result = {}
+    local Hints = {}
     local Seen = {}
 
     local function AddProbe(Line: string)
@@ -368,39 +368,24 @@ function Process:FindCallingClosures(_Offset: number?, Probe: table?): {(...any)
         end
     end
 
-    --// Весь обход — под identity 8 (как Hook:Index)
     local Identity = getthreadidentity()
     setthreadidentity(8)
 
-    for Level = 1, 12 do
-        --// Конец стека — выходим. debug.info напрямую: за пределами
-        --// стека "l" даёт -1, "f" даёт nil (без ошибок).
-        local CurrentLine = debug.info(Level, "l")
-        if CurrentLine == -1 then
-            AddProbe(`L{Level}: end of stack`)
-            break
-        end
-
+    for Level = 1, 16 do
         local Function = debug.info(Level, "f")
         if not Function then
-            AddProbe(`L{Level}: no function`)
+            AddProbe(`L{Level}: REAL end of stack`)
             break
         end
 
-        --// Дубликат (newcclosure/trampoline) — пропускаем
         if Seen[Function] then
             AddProbe(`L{Level}: duplicate`)
             continue
         end
         Seen[Function] = true
 
-        --// C-функция — отсекаем ДО getfenv (иначе getfenv может
-        --// вернуть env вызывающего и C-функция «притворится» игрой)
         local Source = debug.info(Function, "s")
-        if Source == "[C]" then
-            AddProbe(`L{Level}: [C] skip`)
-            continue
-        end
+        local IsC = Source == "[C]"
 
         local Success, Env = pcall(Getfenv, Function)
         if not Success then
@@ -412,13 +397,29 @@ function Process:FindCallingClosures(_Offset: number?, Probe: table?): {(...any)
             continue
         end
 
-        AddProbe(`L{Level}: OK ({Source})`)
+        --// script-хинт с ЛЮБОГО не-Sigma фрейма (C-фреймы Delta
+        --// несут env.script игры — это загрузчик/владелец потока)
+        if type(Env) == "table" then
+            local ScriptHint = rawget(Env, "script")
+            if typeof(ScriptHint) == "Instance" then
+                table.insert(Hints, ScriptHint)
+                AddProbe(`L{Level}: hint {ScriptHint} ({IsC and "C" or "lua"})`)
+            end
+        end
+
+        --// C-фреймы как closures не подходят (нет Lua-локалов/констант)
+        if IsC then
+            AddProbe(`L{Level}: [C] skip (hint saved)`)
+            continue
+        end
+
+        AddProbe(`L{Level}: OK closure ({Source})`)
         table.insert(Result, Function)
         if #Result >= 8 then break end
     end
 
     setthreadidentity(Identity)
-    return Result
+    return Result, Hints
 end
 --// Обратная совместимость: первый (ближайший) вызывающий closure
 function Process:FindCallingLClosure(Offset: number)
@@ -644,8 +645,6 @@ local ProcessCallback = newcclosure(function(Data: RemoteData, Remote, ...): tab
     }
 end)
 
---// [FIX] Выбор SourceScript/CallerScript по критерию (валидный Instance,
---// отличается от SourceScript), а не по индексам [1]/[2].
 function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
 	local Method = Data.Method
     local TransferType = Data.TransferType
@@ -675,12 +674,12 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         self:Merge(Data, ExtraData)
     end
 
-    --// [FIX] SourceScript = первый фрейм с валидным Instance;
-    --// CallerScript = первый после него с ДРУГИМ скриптом.
-    --// StackProbe — диагностика стека для Caller Info.
+    --// SourceScript = первый Lua-фрейм с валидным Instance (ClientCore).
+    --// CallerScript = первый хинт/скрипт, отличный от SourceScript
+    --// (C-фрейм на Delta несёт env.script загрузчика = Framework).
     if not IsReceive then
         StackProbe = {}
-        local Closures = self:FindCallingClosures(6, StackProbe)
+        local Closures, Hints = self:FindCallingClosures(6, StackProbe)
 
         local SourceIndex = nil
         for i, F in Closures do
@@ -694,12 +693,23 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         end
 
         if SourceIndex then
-            for i = SourceIndex + 1, #Closures do
-                local S = self:GetScriptFromFunc(Closures[i])
-                if typeof(S) == "Instance" and S ~= SourceScript then
-                    CallerFunction = Closures[i]
-                    CallerScript = S
+            --// 1) хинты (C-фреймы: владелец потока/загрузчик)
+            for _, Hint in Hints do
+                if typeof(Hint) == "Instance" and Hint ~= SourceScript then
+                    CallerScript = Hint
                     break
+                end
+            end
+
+            --// 2) fallback: скрипт следующего Lua-фрейма
+            if not CallerScript then
+                for i = SourceIndex + 1, #Closures do
+                    local S = self:GetScriptFromFunc(Closures[i])
+                    if typeof(S) == "Instance" and S ~= SourceScript then
+                        CallerFunction = Closures[i]
+                        CallerScript = S
+                        break
+                    end
                 end
             end
         end
@@ -710,8 +720,7 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         Remote = cloneref(Remote),
 		CallingScript = CallingScript,
         CallingFunction = CallingFunction,
-        --// [FIX] Fallback: обход стека на Delta не всегда резолвит
-        --// SourceScript, а getcallingscript() видит вызывающий скрипт.
+        --// Fallback: если стек пуст — getcallingscript() (владелец потока)
         SourceScript = SourceScript or CallingScript,
         CallerScript = CallerScript,
         StackProbe = StackProbe,

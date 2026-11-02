@@ -205,10 +205,7 @@ local A,B,C,D,E,F=(' %s%s '):format(z,z),{[('[^%s] %s'):format(z,z)]=0,[(' %s%s'
 function()local A,B,C=getfenv(),type,tostring for D,E in next,w do local F=A[D]
 if B(F)=='table'then local G={}for H,I in next,F do G[H]=true end w[D]=G end end
 local D,E={},Enum:GetEnums()for F=1,#E do D[C(E[F])]=true end w.Enum=D x=true
-end,function(A)local B=A.GuiElems.EditBox B.Focused:Connect(function()A:
-ConnectEditBoxEvent()A.Editing=true A.EditBoxCopying=true if B.Text==''then B.Text=' 'end A.EditBoxCopying=false A.__ebBuf=B.Text:gsub('\t','    ') end)B.FocusLost:Connect(function()A:
-DisconnectEditBoxEvent()A.Editing=false A.EditBoxCopying=true B.Text='' A.EditBoxCopying=false A.__ebBuf=nil end)B:GetPropertyChangedSignal'Text':
-Connect(function()if A.EditBoxCopying then A.__ebBuf=B.Text:gsub('\t','    ')return end if#B.Text==0 then A.EditBoxCopying=true B.Text=' ' A.EditBoxCopying=false end local C=B.Text:gsub('\t','    ') if A.__ebSkip and tick()-A.__ebSkip<0.15 then A.__ebBuf=C return end local D=A.__ebBuf or '' if C==D then return end local p=0 while p<#D and p<#C and D:sub(p+1,p+1)==C:sub(p+1,p+1)do p=p+1 end local s=0 while s<#D-p and s<#C-p and D:sub(#D-s,#D-s)==C:sub(#C-s,#C-s)do s=s+1 end local rem=#D-p-s if rem>0 then A.__ebHandled=tick() end if rem>0 then if A:IsValidRange()then A:DeleteRange({A.SelectionRange[1],A.SelectionRange[2]},false,true)rem=rem-1 end while rem>0 do local cx,cy=A.CursorX,A.CursorY local tk=math.min(cx,rem) if tk>0 then A:DeleteRange({{cx-tk,cy},{cx,cy}},false,true)rem=rem-tk else if cy==0 then break end A:DeleteRange({{#A.Lines[cy],cy-1},{0,cy}},false,true)rem=rem-1 end end end local ins=C:sub(p+1,#C-s) if#ins>0 then A:AppendText(ins)end A.__ebBuf=C A:ResetSelection(true) end)end,function(A)local B,C=A.
+end,function(A)local B=A.GuiElems.EditBox B.Focused:Connect(function()A:ConnectEditBoxEvent()A.Editing=true A.EditBoxCopying=true if B.Text==''then B.Text=' 'end A.EditBoxCopying=false A.__ebBuf=B.Text:gsub('\t','    ') end) B.FocusLost:Connect(function()A:DisconnectEditBoxEvent()A.Editing=false A.EditBoxCopying=true B.Text='' A.EditBoxCopying=false A.__ebBuf=nil end) B:GetPropertyChangedSignal'Text':Connect(function() if A.EditBoxCopying then A.__ebBuf=B.Text:gsub('\t','    ')return end if#B.Text==0 then A.EditBoxCopying=true B.Text=' ' A.EditBoxCopying=false end local C=B.Text:gsub('\t','    ')local D=A.__ebBuf or '' if C==D then return end local p=0 while p<#D and p<#C and D:sub(p+1,p+1)==C:sub(p+1,p+1)do p=p+1 end local s=0 while s<#D-p and s<#C-p and D:sub(#D-s,#D-s)==C:sub(#C-s,#C-s)do s=s+1 end local rem=#D-p-s if rem>0 then if A:IsValidRange()then A:DeleteRange({A.SelectionRange[1],A.SelectionRange[2]},false,true)A:ResetSelection(true)rem=rem-1 end while rem>0 do local cx,cy=A.CursorX,A.CursorY local tk=math.min(cx,rem) if tk>0 then A:DeleteRange({{cx-tk,cy},{cx,cy}},false,true)rem=rem-tk else if cy==0 then break end A:DeleteRange({{#A.Lines[cy],cy-1},{0,cy}},false,true)rem=rem-1 end end end local ins=C:sub(p+1,#C-s) if#ins>0 then A:AppendText(ins)end A.__ebBuf=C A:ResetSelection(true) end) end,function(A)local B,C=A.
 GuiElems.LinesFrame,A.Lines B.InputBegan:Connect(function(D)if n(D,'StartAndEnd'
 )then local E,F,G,H=math.ceil(A.FontSize/2),A.FontSize,l.X-B.AbsolutePosition.X,
 l.Y-B.AbsolutePosition.Y local I,J,K,L,M,N,O=math.round(G/E)+A.ViewX,math.floor(
@@ -276,18 +273,6 @@ SelectionRange[2]else M={G.CursorX,G.CursorY}end if not L then local N=G.Lines[G
 CursorX=#O end G.FloatCursorX=G.CursorX G:UpdateCursor()L=L or{G.CursorX,G.
 CursorY}end G:DeleteRange({L,M},false,true)G:ResetSelection(true)G:JumpToCursor(
 )end)elseif J==I.Delete then K(I.Delete,function()local L,M if G:IsValidRange()
-then L=G.SelectionRange[1]M=G.SelectionRange[2]else L={G.CursorX,G.CursorY}end
-if not M then local N=G.Lines[G.CursorY+1]or''local O,P=G.CursorX+1+(N:sub(G.
-CursorX+1,G.CursorX+4)==A and 3 or 0),G.CursorY if O>#N then P=P+1 O=0 end G:
-UpdateCursor()M=M or{O,P}end G:DeleteRange({L,M},false,true)G:ResetSelection(
-true)G:JumpToCursor()end end)elseif J==I.Backspace then local __h=G.__ebHandled and tick()-G.__ebHandled<0.15 if not __h then K(I.Backspace,
-function()G.__ebSkip=tick()local L,M if G:IsValidRange()then L=G.SelectionRange[1]M=G.
-SelectionRange[2]else M={G.CursorX,G.CursorY}end if not L then local N=G.Lines[G
-.CursorY+1]or''G.CursorX=G.CursorX-1-(N:sub(G.CursorX-3,G.CursorX)==A and 3 or 0
-)if G.CursorX<0 then G.CursorY=G.CursorY-1 local O=G.Lines[G.CursorY+1]or''G.
-CursorX=#O end G.FloatCursorX=G.CursorX G:UpdateCursor()L=L or{G.CursorX,G.
-CursorY}end G:DeleteRange({L,M},false,true)G:ResetSelection(true)G:JumpToCursor(
-)end)end elseif J==I.Delete then K(I.Delete,function()local L,M if G:IsValidRange()
 then L=G.SelectionRange[1]M=G.SelectionRange[2]else L={G.CursorX,G.CursorY}end
 if not M then local N=G.Lines[G.CursorY+1]or''local O,P=G.CursorX+1+(N:sub(G.
 CursorX+1,G.CursorX+4)==A and 3 or 0),G.CursorY if O>#N then P=P+1 O=0 end G:

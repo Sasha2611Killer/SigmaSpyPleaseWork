@@ -37,7 +37,6 @@ local Ui = {
 		"Remote",
 		"CallingScript",
 		"IsActor",
-		"ScriptHash",
 		"Id"
 	},
 
@@ -1062,11 +1061,16 @@ function Ui:SetFocusedRemote(Data)
 			UsedFallback = true
 		end
 
-		--// Полностью мёртвые ссылки отсекаем, НО загруженные-через-другой-
-		--// скрипт-и-удалённые остаются доступными (getscriptbytecode их отдаёт)
-		if typeof(ToDecompile) == "Instance" and not Process:IsScriptAvailable(ToDecompile) then
-			Ui:ShowModal({"The Script has been destroyed by the game (-9999999 AURA)"})
-			return
+		--// getcallingscript() может вернуть ссылку на УНИЧТОЖЕННЫЙ скрипт:
+		--// декомпил такого даст мусорную ошибку "Failed to get script bytecode".
+		if typeof(ToDecompile) == "Instance" then
+			local OkAlive, Alive = pcall(function()
+				return ToDecompile:IsDescendantOf(game)
+			end)
+			if not OkAlive or not Alive then
+				Ui:ShowModal({"The Script has been destroyed by the game (-9999999 AURA)"})
+				return
+			end
 		end
 
 		local Editor = CodeEditor
@@ -1110,12 +1114,6 @@ function Ui:SetFocusedRemote(Data)
 			AutomaticSize = Enum.AutomaticSize.Y,
 		},
 		Buttons = {
-			{
-				Text = "Copy script hash",
-				Callback = function()
-					SetClipboard(Data.ScriptHash or "N/A (hash unavailable)")
-				end,
-			},
 			{
 				Text = "Copy script path",
 				Callback = function()
@@ -1162,11 +1160,6 @@ function Ui:SetFocusedRemote(Data)
 		}
 	})
 
-	--// Хеш скрипта (getscripthash): берём SourceScript, иначе CallingScript.
-	--// Показывается в инфо-таблице, копируется кнопкой ниже.
-	local HashSource = Data.SourceScript or Data.CallingScript
-	Data.ScriptHash = HashSource and Process:GetScriptHash(HashSource) or nil
-
 	--// Remote information table
 	self:DisplayTable(Tab, {
 		Rows = {"Name", "Value"},
@@ -1190,7 +1183,49 @@ function Ui:SetFocusedRemote(Data)
 	Data:MakeScript("Remote")
 end
 
+--// Окно для callback-значений (OnClientInvoke / OnInvoke):
+--// показываем скрипт-владельца колбэка с кнопкой Decompile
+function Ui:ViewCallback(RemoteName: string, Callback: any)
+	local Window = self:CreateWindow({
+		Title = `Callback for: {RemoteName}`,
+		Size = UDim2.fromOffset(450, 110)
+	})
+
+	local Script = nil
+	if typeof(Callback) == "function" then
+		Script = Process:GetScriptFromFunc(Callback)
+	end
+
+	local Row = Window:Row()
+	Row:Label({
+		Text = `Script: {Script and Script:GetFullName() or "Unknown (no script in env)"}`
+	})
+
+	if Script and Process:IsScriptAvailable(Script) then
+		Row:Button({
+			Text = "Decompile",
+			Callback = function()
+				local Task = self:FilterName(`Viewing: {Script}.lua`, 200)
+				local Editor = self:MakeEditorPopoutWindow(nil, {
+					Title = Task
+				})
+				self:Decompile(Editor, Script)
+			end
+		})
+	end
+
+	Window:Center()
+	return Window
+end
+
 function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
+	--// Для RemoteFunction (OnClientInvoke/OnInvoke) Signal — это
+	--// callback-значение, а не RBXScriptSignal: getconnections на нём
+	--// упал бы. Показываем окно самого колбэка.
+	if typeof(Signal) ~= "RBXScriptSignal" then
+		return self:ViewCallback(RemoteName, Signal)
+	end
+
 	local Window = self:CreateWindow({
 		Title = `Connections for: {RemoteName}`,
 		Size = UDim2.fromOffset(450, 250)

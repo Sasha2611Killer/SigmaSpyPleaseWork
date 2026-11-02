@@ -1074,9 +1074,14 @@ function Ui:SetFocusedRemote(Data)
 		Ui:Decompile(Editor, ToDecompile)
 	end
 	
-	--// RemoteOptions
-	self:CreateOptionsForDict(Tab, RemoteData, function()
-		Process:UpdateRemoteData(Id, RemoteData)
+	--// RemoteOptions (изолировано: внутренние ошибки ReGui при
+	--// построении таблицы опций не должны ронять всю вкладку remote)
+	xpcall(function()
+		self:CreateOptionsForDict(Tab, RemoteData, function()
+			Process:UpdateRemoteData(Id, RemoteData)
+		end)
+	end, function(Err)
+		warn("SigmaSpy RemoteOptions:", tostring(Err):sub(1, 200))
 	end)
 
 	--// Instance options
@@ -1320,6 +1325,13 @@ function Ui:ClearLogs()
 end
 
 function Ui:QueueLog(Data)
+	--// Guard: логи из actor-VM могут приходить с Remote == nil
+	--// (инстанс не пережил пересечение границы Lua-state через канал).
+	--// attempt to index nil with 'Parent' в CreateLog лечится здесь.
+	if typeof(Data.Remote) ~= "Instance" then
+		return
+	end
+
 	local LogQueue = self.LogQueue
 	Process:Merge(Data, {
 		Args = Process:DeepCloneTable(Data.Args),
@@ -1361,6 +1373,11 @@ function Ui:FilterName(Name: string, CharacterLimit: number?): string
 end
 
 function Ui:CreateLog(Data: Log)
+	--// Guard: дропаем логи без валидного remote (см. QueueLog)
+	if typeof(Data.Remote) ~= "Instance" then
+		return
+	end
+
 	--// Unpack log data
     local Remote = Data.Remote
 	local Method = Data.Method

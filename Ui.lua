@@ -36,6 +36,7 @@ local Ui = {
 		"Method",
 		"Remote",
 		"CallingScript",
+		"CallerScript",
 		"IsActor",
 		"ScriptHash",
 		"Id"
@@ -871,9 +872,10 @@ function Ui:DisplayTable(Parent, Config: DisplayTableConfig): table
 		for Count, Catagory in Rows do
 			local Column = Row:NextColumn()
 			
-			--// Value text
+			--// Value text. false/0 тоже отображаем (только nil пропускаем) —
+			--// иначе IsActor=false исчезал из таблицы
 			local Value = Catagory == "Name" and Name or DataTable[Name]
-			if not Value then continue end
+			if Value == nil then continue end
 
 			--// Create filtered label
 			local String = self:FilterName(`{Value}`, 150)
@@ -964,8 +966,8 @@ function Ui:SetFocusedRemote(Data)
 	function Data:ScriptOptions(Button: GuiButton)
 		Ui:MakeButtonMenu(Button, {self}, {
 			["Caller Info"] = DataConnection("GenerateInfo"),
-			["Decompile"] = DataConnection("Decompile", "SourceScript"),
-			["Decompile Calling"] = DataConnection("Decompile", "CallingScript"),
+			["Decompile (source)"] = DataConnection("Decompile", "SourceScript"),
+			["Decompile Caller (loader)"] = DataConnection("Decompile", "CallingScript"),
 			["Repeat Call"] = DataConnection("RepeatCall"),
 			["Save Bytecode"] = DataConnection("SaveBytecode"),
 		})
@@ -1062,16 +1064,32 @@ function Ui:SetFocusedRemote(Data)
 		end
 
 		local DecompilePopout = Flags:GetFlagValue("DecompilePopout")
-		local ToDecompile = Data[WhichScript]
+		local ToDecompile = nil
 		local UsedFallback = false
 
-		--// Fallback: SourceScript часто nil (env вызывающего closure без
-		--// глобала "script") — getscriptbytecode(nil) тогда падает с
-		--// "Failed to get script bytecode". Пробуем CallingScript.
-		--// Помечаем фолбэк в заголовке, чтобы не путать с реальным SourceScript.
-		if not ToDecompile and WhichScript == "SourceScript" then
-			ToDecompile = Data.CallingScript
-			UsedFallback = true
+		--// SourceScript = модуль-источник вызова (может быть удалён, но
+		--// загружен — IsScriptAvailable это пропускает). Если модуль не
+		--// найден — fallback на CallerScript (загрузчик).
+		--// "CallingScript"-ветка = именно загрузчик (второй не-Sigma
+		--// фрейм), fallback — getcallingscript().
+		if WhichScript == "SourceScript" then
+			ToDecompile = Data.SourceScript
+			if not ToDecompile then
+				ToDecompile = Data.CallerScript
+				UsedFallback = true
+			end
+		else
+			ToDecompile = Data.CallerScript
+			if not ToDecompile then
+				ToDecompile = Data.CallingScript
+				UsedFallback = true
+			end
+		end
+
+		--// Ничего не нашли — честное сообщение вместо ошибки байткода
+		if not ToDecompile then
+			Ui:ShowModal({"Script not found: neither source nor caller could be resolved"})
+			return
 		end
 
 		--// Полностью мёртвые ссылки отсекаем, НО загруженные-через-другой-
@@ -1086,8 +1104,11 @@ function Ui:SetFocusedRemote(Data)
 		--// Problem check
 		if not ScriptCheck(ToDecompile, true) then return end
 		local Task = Ui:FilterName(`Viewing: {ToDecompile}.lua`, 200)
+		if WhichScript == "CallingScript" then
+			Task = `{Task} (caller)`
+		end
 		if UsedFallback then
-			Task = `{Task} (via Calling)`
+			Task = `{Task} (fallback)`
 		end
 		
 		--// Automatically Pop-out the editor for decompiling if enabled
@@ -1199,7 +1220,7 @@ function Ui:SetFocusedRemote(Data)
 
 	--// Хеш скрипта (getscripthash): SourceScript, иначе CallingScript.
 	--// Показывается в инфо-таблице, копируется кнопкой ниже.
-	local HashSource = Data.SourceScript or Data.CallingScript
+	local HashSource = Data.SourceScript or Data.CallerScript
 	Data.ScriptHash = HashSource and Process:GetScriptHash(HashSource) or nil
 
 	--// Remote information table

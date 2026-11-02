@@ -613,6 +613,115 @@ local function MakeActiveDataCallback(Name: string)
 	end
 end
 
+--// Нативное окно ввода для мобильных клавиатур:
+--// ReGui CodeFrame не принимает ввод на мобильном Delta, а нативный
+--// TextBox принимает. Ввод сюда → вставка в редактор.
+local InputWindow = nil
+
+function Ui:MakeInputWindow(CodeEditor)
+	if InputWindow and InputWindow.Parent then
+		InputWindow.TextBox:CaptureFocus()
+		return
+	end
+
+	local Parent = (gethui and gethui()) or game:GetService("CoreGui")
+
+	local ScreenGui = Instance.new("ScreenGui")
+	ScreenGui.Name = "SigmaSpyInput"
+	ScreenGui.ResetOnSpawn = false
+	ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	ScreenGui.Parent = Parent
+
+	local Back = Instance.new("TextButton")
+	Back.Size = UDim2.fromScale(1, 1)
+	Back.BackgroundColor3 = Color3.new(0, 0, 0)
+	Back.BackgroundTransparency = 0.5
+	Back.Text = ""
+	Back.Parent = ScreenGui
+
+	local Frame = Instance.new("Frame")
+	Frame.AnchorPoint = Vector2.new(0.5, 0.5)
+	Frame.Position = UDim2.fromScale(0.5, 0.5)
+	Frame.Size = UDim2.new(0.8, 0, 0.5, 0)
+	Frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+	Frame.Parent = ScreenGui
+	Instance.new("UICorner", Frame).CornerRadius = UDim.new(0, 8)
+
+	local Box = Instance.new("TextBox")
+	Box.MultiLine = true
+	Box.ClearTextOnFocus = false
+	Box.Text = ""
+	Box.PlaceholderText = "Type here… (native input works on mobile)"
+	Box.TextColor3 = Color3.new(1, 1, 1)
+	Box.PlaceholderColor3 = Color3.fromRGB(150, 150, 150)
+	Box.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+	Box.Position = UDim2.new(0, 8, 0, 8)
+	Box.Size = UDim2.new(1, -16, 1, -56)
+	Box.TextXAlignment = Enum.TextXAlignment.Left
+	Box.TextYAlignment = Enum.TextYAlignment.Top
+	Box.Font = Enum.Font.Code
+	Box.TextSize = 14
+	Box.Parent = Frame
+	Instance.new("UICorner", Box).CornerRadius = UDim.new(0, 6)
+
+	local function MakeButton(Text, Order, Callback)
+		local B = Instance.new("TextButton")
+		B.Text = Text
+		B.LayoutOrder = Order
+		B.Size = UDim2.new(0.5, -12, 0, 34)
+		B.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+		B.TextColor3 = Color3.new(1, 1, 1)
+		B.Font = Enum.Font.GothamBold
+		B.TextSize = 14
+		B.Parent = Frame
+		Instance.new("UICorner", B).CornerRadius = UDim.new(0, 6)
+		B.MouseButton1Click:Connect(Callback)
+		return B
+	end
+
+	local Row = Instance.new("UIListLayout")
+	Row.FillDirection = Enum.FillDirection.Horizontal
+	Row.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	Row.Padding = UDim.new(0, 8)
+	Row.VerticalAlignment = Enum.VerticalAlignment.Bottom
+	Row.Parent = Frame
+	local Pad = Instance.new("UIPadding")
+	Pad.PaddingBottom = UDim.new(0, 8)
+	Pad.Parent = Frame
+
+	MakeButton("Insert at cursor", 1, function()
+		local Ok, Err = pcall(function()
+			CodeEditor:AppendText(Box.Text)
+		end)
+		if not Ok then
+			warn("SigmaSpy Input insert:", Err)
+		end
+		ScreenGui:Destroy()
+		InputWindow = nil
+	end)
+
+	MakeButton("Replace all", 2, function()
+		local Ok, Err = pcall(function()
+			CodeEditor:SetText(Box.Text)
+		end)
+		if not Ok then
+			warn("SigmaSpy Input replace:", Err)
+		end
+		ScreenGui:Destroy()
+		InputWindow = nil
+	end)
+
+	Back.MouseButton1Click:Connect(function()
+		ScreenGui:Destroy()
+		InputWindow = nil
+	end)
+
+	InputWindow = Box
+	task.defer(function()
+		Box:CaptureFocus()
+	end)
+end
+
 function Ui:MakeEditorTab(InfoSelector)
 	local Default = self.DefaultEditorContent
 	local SyntaxColors = Config.SyntaxColors
@@ -670,6 +779,12 @@ function Ui:MakeEditorTab(InfoSelector)
 			{
 				Text = "Build",
 				Callback = MakeActiveDataCallback("BuildScript")
+			},
+			{
+				Text = "Keyboard",
+				Callback = function()
+					self:MakeInputWindow(CodeEditor)
+				end
 			},
 			{
 				Text = "Pop-out",
@@ -1218,10 +1333,9 @@ function Ui:SetFocusedRemote(Data)
 		}
 	})
 
-	--// Хеш скрипта (getscripthash): SourceScript → CallerScript →
-	--// CallingScript. Последний важен для ВХОДЯЩИХ логов (там Source/Caller
-	--// пустые, а CallingScript = скрипт, обрабатывающий событие).
-	local HashSource = Data.SourceScript or Data.CallerScript or Data.CallingScript
+	--// Хеш скрипта (getscripthash): SourceScript, иначе CallingScript.
+	--// Показывается в инфо-таблице, копируется кнопкой ниже.
+	local HashSource = Data.SourceScript or Data.CallerScript
 	Data.ScriptHash = HashSource and Process:GetScriptHash(HashSource) or nil
 
 	--// Remote information table

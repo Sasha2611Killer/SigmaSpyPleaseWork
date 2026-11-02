@@ -205,7 +205,11 @@ local A,B,C,D,E,F=(' %s%s '):format(z,z),{[('[^%s] %s'):format(z,z)]=0,[(' %s%s'
 function()local A,B,C=getfenv(),type,tostring for D,E in next,w do local F=A[D]
 if B(F)=='table'then local G={}for H,I in next,F do G[H]=true end w[D]=G end end
 local D,E={},Enum:GetEnums()for F=1,#E do D[C(E[F])]=true end w.Enum=D x=true
-end,function(A)local B=A.GuiElems.EditBox B.Focused:Connect(function()A:ConnectEditBoxEvent()A.Editing=true A.EditBoxCopying=true if B.Text==''then B.Text=' 'end A.EditBoxCopying=false A.__ebBuf=B.Text:gsub('\t','    ') end) B.FocusLost:Connect(function()A:DisconnectEditBoxEvent()A.Editing=false A.EditBoxCopying=true B.Text='' A.EditBoxCopying=false A.__ebBuf=nil end) B:GetPropertyChangedSignal'Text':Connect(function() if A.EditBoxCopying then A.__ebBuf=B.Text:gsub('\t','    ')return end if#B.Text==0 then A.EditBoxCopying=true B.Text=' ' A.EditBoxCopying=false end local C=B.Text:gsub('\t','    ')local D=A.__ebBuf or '' if C==D then return end local p=0 while p<#D and p<#C and D:sub(p+1,p+1)==C:sub(p+1,p+1)do p=p+1 end local s=0 while s<#D-p and s<#C-p and D:sub(#D-s,#D-s)==C:sub(#C-s,#C-s)do s=s+1 end local rem=#D-p-s if rem>0 then if A:IsValidRange()then A:DeleteRange({A.SelectionRange[1],A.SelectionRange[2]},false,true)A:ResetSelection(true)rem=rem-1 end while rem>0 do local cx,cy=A.CursorX,A.CursorY local tk=math.min(cx,rem) if tk>0 then A:DeleteRange({{cx-tk,cy},{cx,cy}},false,true)rem=rem-tk else if cy==0 then break end A:DeleteRange({{#A.Lines[cy],cy-1},{0,cy}},false,true)rem=rem-1 end end end local ins=C:sub(p+1,#C-s) if#ins>0 then A:AppendText(ins)end A.__ebBuf=C A:ResetSelection(true) end) end,function(A)local B,C=A.
+end,function(A)local B=A.GuiElems.EditBox B.Focused:Connect(function()A:
+ConnectEditBoxEvent()A.Editing=true end)B.FocusLost:Connect(function()A:
+DisconnectEditBoxEvent()A.Editing=false end)B:GetPropertyChangedSignal'Text':
+Connect(function()local C=B.Text if#C==0 or A.EditBoxCopying then return end C=C
+:gsub('\t','    ')B.Text=''A:AppendText(C)end)end,function(A)local B,C=A.
 GuiElems.LinesFrame,A.Lines B.InputBegan:Connect(function(D)if n(D,'StartAndEnd'
 )then local E,F,G,H=math.ceil(A.FontSize/2),A.FontSize,l.X-B.AbsolutePosition.X,
 l.Y-B.AbsolutePosition.Y local I,J,K,L,M,N,O=math.round(G/E)+A.ViewX,math.floor(
@@ -233,7 +237,7 @@ true J.Parent=H local K=o'TextLabel'K.Name='LineNumbers'K.BackgroundTransparency
 TextYAlignment=Enum.TextYAlignment.Top K.ClipsDescendants=true K.RichText=true K
 .Parent=H r.Name='Cursor'r.BackgroundColor3=Color3.fromRGB(220,220,220)r.
 BorderSizePixel=0 r.Parent=H local L=o'TextBox'L.Name='EditBox'L.MultiLine=true
-L.Visible=true L.BackgroundTransparency=1 L.TextTransparency=1 L.TextColor3=Color3.new(0,0,0) L.PlaceholderColor3=Color3.new(0,0,0) L.ClearTextOnFocus=false L.Position=UDim2.new(1,-2,1,-2)L.Size=UDim2.fromOffset(1,1) L.Parent=H L.TextSize=G.FontSize L.FontFace=G.FontFace C.Invis=j
+L.Visible=false L.Parent=H L.TextSize=G.FontSize L.FontFace=G.FontFace C.Invis=j
 :Create(r,TweenInfo.new(0,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),{
 BackgroundTransparency=1})C.Vis=j:Create(r,TweenInfo.new(0,Enum.EasingStyle.
 Quart,Enum.EasingDirection.Out),{BackgroundTransparency=0})local M=o'Frame'M.

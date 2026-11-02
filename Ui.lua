@@ -35,6 +35,7 @@ local Ui = {
 		"MetaMethod",
 		"Method",
 		"Remote",
+		"SourceScript",
 		"CallingScript",
 		"CallerScript",
 		"IsActor",

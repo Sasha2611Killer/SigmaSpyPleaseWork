@@ -430,18 +430,34 @@ function Process:GetScriptFromFunc(Func: (...any) -> ...any)
     end
 
     --// Fallback: env без "script" (loadstring/обёртки). Имя чанка функции
-    --// в Roblox равно GetFullName скрипта — ищем инстанс по точному совпадению.
+    --// в Roblox равно GetFullName скрипта. Ищем по: descendants +
+    --// getloadedmodules + getrunningscripts + getscripts — последние три
+    --// видят скрипты, загруженные через другой скрипт и уже удалённые
+    --// (в descendants их нет, но байткод у них доступен).
     local SourceOk, Source = pcall(debug.info, Func, "s")
     if SourceOk and type(Source) == "string" and Source ~= "[C]" and #Source > 0 then
         local TargetName = Source:match("[%w_]+$")
         if TargetName then
+            local Candidates = {game:GetDescendants()}
+            if typeof(getloadedmodules) == "function" then
+                table.insert(Candidates, getloadedmodules())
+            end
+            if typeof(getrunningscripts) == "function" then
+                table.insert(Candidates, getrunningscripts())
+            end
+            if typeof(getscripts) == "function" then
+                table.insert(Candidates, getscripts())
+            end
+
             local Ok, Result = pcall(function()
-                for _, Desc in game:GetDescendants() do
-                    if Desc.Name == TargetName
-                        and Desc:IsA("LuaSourceContainer")
-                        and Desc:GetFullName() == Source
-                    then
-                        return Desc
+                for _, List in Candidates do
+                    for _, Script in List do
+                        if Script.Name == TargetName
+                            and Script:IsA("LuaSourceContainer")
+                            and Script:GetFullName() == Source
+                        then
+                            return Script
+                        end
                     end
                 end
                 return nil
@@ -453,6 +469,55 @@ function Process:GetScriptFromFunc(Func: (...any) -> ...any)
     end
 
     return
+end
+
+--// Хеш скрипта (getscripthash) — стабильный идентификатор для сравнения
+--// версий/источников скрипта. nil если executor не поддерживает.
+function Process:GetScriptHash(Script: Instance): string?
+    if typeof(Script) ~= "Instance" then return nil end
+    if typeof(getscripthash) ~= "function" then return nil end
+
+    local Ok, Hash = pcall(getscripthash, Script)
+    if Ok and type(Hash) == "string" then
+        return Hash
+    end
+    return nil
+end
+
+--// Доступен ли скрипт для декомпиля: живой ИЛИ загруженный-но-удалённый
+--// (require'd скрипты остаются в памяти — getscriptbytecode их отдаёт).
+--// Только полностью мёртвые ссылки считаем недоступными.
+function Process:IsScriptAvailable(Script: Instance): boolean
+    if typeof(Script) ~= "Instance" then return false end
+
+    local OkAlive, Alive = pcall(function()
+        return Script:IsDescendantOf(game)
+    end)
+    if OkAlive and Alive then
+        return true
+    end
+
+    --// Удалён, но загружен?
+    local Lists = {}
+    if typeof(getloadedmodules) == "function" then
+        table.insert(Lists, getloadedmodules())
+    end
+    if typeof(getrunningscripts) == "function" then
+        table.insert(Lists, getrunningscripts())
+    end
+    if typeof(getscripts) == "function" then
+        table.insert(Lists, getscripts())
+    end
+
+    for _, List in Lists do
+        for _, S in List do
+            if S == Script then
+                return true
+            end
+        end
+    end
+
+    return false
 end
 
 function Process:ConnectionIsValid(Connection: table): boolean

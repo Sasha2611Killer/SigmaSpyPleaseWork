@@ -37,6 +37,7 @@ local Ui = {
 		"Remote",
 		"CallingScript",
 		"IsActor",
+		"ScriptHash",
 		"Id"
 	},
 
@@ -1061,16 +1062,11 @@ function Ui:SetFocusedRemote(Data)
 			UsedFallback = true
 		end
 
-		--// getcallingscript() может вернуть ссылку на УНИЧТОЖЕННЫЙ скрипт:
-		--// декомпил такого даст мусорную ошибку "Failed to get script bytecode".
-		if typeof(ToDecompile) == "Instance" then
-			local OkAlive, Alive = pcall(function()
-				return ToDecompile:IsDescendantOf(game)
-			end)
-			if not OkAlive or not Alive then
-				Ui:ShowModal({"The Script has been destroyed by the game (-9999999 AURA)"})
-				return
-			end
+		--// Полностью мёртвые ссылки отсекаем, НО загруженные-через-другой-
+		--// скрипт-и-удалённые остаются доступными (getscriptbytecode их отдаёт)
+		if typeof(ToDecompile) == "Instance" and not Process:IsScriptAvailable(ToDecompile) then
+			Ui:ShowModal({"The Script has been destroyed by the game (-9999999 AURA)"})
+			return
 		end
 
 		local Editor = CodeEditor
@@ -1114,6 +1110,12 @@ function Ui:SetFocusedRemote(Data)
 			AutomaticSize = Enum.AutomaticSize.Y,
 		},
 		Buttons = {
+			{
+				Text = "Copy script hash",
+				Callback = function()
+					SetClipboard(Data.ScriptHash or "N/A (hash unavailable)")
+				end,
+			},
 			{
 				Text = "Copy script path",
 				Callback = function()
@@ -1159,6 +1161,11 @@ function Ui:SetFocusedRemote(Data)
 			}
 		}
 	})
+
+	--// Хеш скрипта (getscripthash): берём SourceScript, иначе CallingScript.
+	--// Показывается в инфо-таблице, копируется кнопкой ниже.
+	local HashSource = Data.SourceScript or Data.CallingScript
+	Data.ScriptHash = HashSource and Process:GetScriptHash(HashSource) or nil
 
 	--// Remote information table
 	self:DisplayTable(Tab, {

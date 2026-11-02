@@ -196,7 +196,6 @@ function Process:DeepCloneTable(Table, Ignore: table?, Visited: table?): table
     if typeof(Table) ~= "table" then return Table end
     local Cache = Visited or {}
 
-    --// Check for cached
     if Cache[Table] then
         return Cache[Table]
     end
@@ -205,14 +204,12 @@ function Process:DeepCloneTable(Table, Ignore: table?, Visited: table?): table
     Cache[Table] = New
 
     for Key, Value in next, Table do
-        --// Check if the value is ignored
         if Ignore and table.find(Ignore, Value) then continue end
 
         Key = self:CheckValue(Key, Ignore, Cache)
         New[Key] = self:CheckValue(Value, Ignore, Cache)
     end
 
-    --// Master clear
     if not Visited then
         table.clear(Cache)
     end
@@ -244,7 +241,6 @@ function Process:CheckExecutor(): boolean
     local Name = identifyexecutor():lower()
     local IsBlacklisted = table.find(Blacklisted, Name)
 
-    --// Some executors have broken functionality
     if IsBlacklisted then
         Ui:ShowUnsupportedExecutor(Name)
         return false
@@ -261,12 +257,10 @@ function Process:CheckFunctions(): boolean
         "setreadonly"
     }
 
-    --// Check if the functions exist in the ENV
     for _, Name in CoreFunctions do
         local Func = self:FuncExists(Name)
         if Func then continue end
 
-        --// Function missing!
         Ui:ShowUnsupported(Name)
         return false
     end
@@ -275,13 +269,11 @@ function Process:CheckFunctions(): boolean
 end
 
 function Process:CheckIsSupported(): boolean
-    --// Check if the executor is blacklisted
     local ExecutorSupported = self:CheckExecutor()
     if not ExecutorSupported then
         return false
     end
 
-    --// Check if the core functions exist
     local FunctionsSupported = self:CheckFunctions()
     if not FunctionsSupported then
         return false
@@ -307,18 +299,14 @@ end
 function Process:RemoteAllowed(Remote: Event, TransferType: string, Method: string?): boolean?
     if typeof(Remote) ~= 'Instance' then return end
 
-    --// Check if the Remote is protected
     if self:IsProtectedRemote(Remote) then return end
 
-    --// Fetch class table
 	local ClassData = self:GetClassData(Remote)
 	if not ClassData then return end
 
-    --// Check if the transfer type has data
 	local Allowed = ClassData[TransferType]
 	if not Allowed then return end
 
-    --// Check if the method is allowed
 	if Method then
 		return table.find(Allowed, Method) ~= nil
 	end
@@ -339,7 +327,6 @@ function Process:GetRemoteSpoof(Remote: Instance, Method: string, ...): table?
 
     local ReturnValues = Spoof.Return
 
-    --// Call the ReturnValues function type
     if typeof(ReturnValues) == "function" then
         ReturnValues = ReturnValues(...)
     end
@@ -351,28 +338,21 @@ function Process:SetNewReturnSpoofs(NewReturnSpoofs: table)
     ReturnSpoofs = NewReturnSpoofs
 end
 
---// [FIX] ВСЕ не-Sigma и не-C Lua-фреймы, начиная с первого.
---// Старая версия стартовала с (Offset - 2) и не отсекала C-функции/дубли,
---// из-за чего SourceScript мог оказаться загрузчиком, C-функцией или nil.
---// Теперь: старт с уровня 1, фильтр по [C] ДО getfenv, дедупликация, до 8.
+--// ВСЕ не-Sigma и не-C Lua-фреймы, начиная с первого.
 function Process:FindCallingClosures(_Offset: number): {(...any) -> ...any}
     local Getfenv = Hook:GetOriginalFunc(getfenv)
     local Result = {}
     local Seen = {}
 
     for Level = 1, 64 do
-        --// Конец стека — выходим
         if debug.info(Level, "l") == -1 then break end
 
         local Function = debug.info(Level, "f")
         if not Function then break end
 
-        --// Дубликат (newcclosure/trampoline) — пропускаем
         if Seen[Function] then continue end
         Seen[Function] = true
 
-        --// C-функция — отсекаем ДО getfenv (иначе getfenv может
-        --// вернуть env вызывающего и C-функция «притворится» игрой)
         local SrcOk, Source = pcall(debug.info, Function, "s")
         if SrcOk and Source == "[C]" then continue end
 
@@ -387,7 +367,6 @@ function Process:FindCallingClosures(_Offset: number): {(...any) -> ...any}
     return Result
 end
 
---// Обратная совместимость: первый (ближайший) вызывающий closure
 function Process:FindCallingLClosure(Offset: number)
     return self:FindCallingClosures(Offset)[1]
 end
@@ -396,12 +375,10 @@ function Process:Decompile(Script: LocalScript | ModuleScript): string
     local KonstantAPI = "http://api.plusgiant5.com/konstant/decompile"
     local ForceKonstant = Config.ForceKonstantDecompiler
 
-    --// Use built-in decompiler if the executor supports it
     if decompile and not ForceKonstant then 
         return decompile(Script)
     end
 
-    --// getscriptbytecode
     local Success, Bytecode = pcall(getscriptbytecode, Script)
     if not Success then
         local Error = `--Failed to get script bytecode, error:\n`
@@ -409,7 +386,6 @@ function Process:Decompile(Script: LocalScript | ModuleScript): string
         return Error, true
     end
 
-    --// Send POST request to the API
     local Responce = request({
         Url = KonstantAPI,
         Body = Bytecode,
@@ -419,7 +395,6 @@ function Process:Decompile(Script: LocalScript | ModuleScript): string
         },
     })
 
-    --// Error check
     if Responce.StatusCode ~= 200 then
         local Error = `--[KONSTANT] Error occured while requesting the API, error:\n`
         Error ..= `\n--[[\n{Responce.Body}\n]]`
@@ -429,9 +404,11 @@ function Process:Decompile(Script: LocalScript | ModuleScript): string
     return Responce.Body
 end
 
---// [FIX] Хвост GetScriptFromFunc: второй проход по getloadedmodules
---// возвращает ТОЛЬКО если кандидат единственный — иначе nil,
---// чтобы не отдать чужой модуль с тем же именем.
+--// [FIX] Поиск источника по ВСЕМ спискам:
+--// getloadedmodules() → ModuleScript (require'd);
+--// getrunningscripts()/getscripts() → LuaSourceContainer
+--// (LocalScript/Script/ModuleScript). Проверка IsA("LuaSourceContainer"),
+--// чтобы находить и скрипты, а не только модули.
 function Process:GetScriptFromFunc(Func: (...any) -> ...any)
     if not Func then return end
 
@@ -445,63 +422,56 @@ function Process:GetScriptFromFunc(Func: (...any) -> ...any)
         end
     end
 
-    --// Fallback: env без "script". Имя чанка = GetFullName скрипта.
-    --// Ищем по descendants + getloadedmodules + getrunningscripts + getscripts.
     local SourceOk, Source = pcall(debug.info, Func, "s")
-    if SourceOk and type(Source) == "string" and Source ~= "[C]" and #Source > 0 then
-        local TargetName = Source:match("[%w_]+$")
-        if TargetName then
-            local Candidates = {game:GetDescendants()}
-            if typeof(getloadedmodules) == "function" then
-                table.insert(Candidates, getloadedmodules())
-            end
-            if typeof(getrunningscripts) == "function" then
-                table.insert(Candidates, getrunningscripts())
-            end
-            if typeof(getscripts) == "function" then
-                table.insert(Candidates, getscripts())
-            end
+    if not (SourceOk and type(Source) == "string" and Source ~= "[C]" and #Source > 0) then
+        return
+    end
 
-            --// Проход 1: точное совпадение GetFullName (per-candidate pcall)
-            for _, List in Candidates do
-                for _, Script in List do
-                    if Script.Name ~= TargetName then continue end
-                    if not Script:IsA("LuaSourceContainer") then continue end
+    local TargetName = Source:match("[%w_]+$")
+    if not TargetName then return end
 
-                    local OkName, FullName = pcall(function()
-                        return Script:GetFullName()
-                    end)
-                    if OkName and FullName == Source then
-                        return Script
-                    end
-                end
-            end
+    --// Собираем все списки (каждый — LuaSourceContainer, разного охвата)
+    local Lists = {}
+    if typeof(getloadedmodules) == "function" then
+        local Ok, L = pcall(getloadedmodules)
+        if Ok and type(L) == "table" then table.insert(Lists, L) end
+    end
+    if typeof(getrunningscripts) == "function" then
+        local Ok, L = pcall(getrunningscripts)
+        if Ok and type(L) == "table" then table.insert(Lists, L) end
+    end
+    if typeof(getscripts) == "function" then
+        local Ok, L = pcall(getscripts)
+        if Ok and type(L) == "table" then table.insert(Lists, L) end
+    end
 
-            --// Проход 2: для удалённых-но-загруженных — по имени,
-            --// только если кандидат ЕДИНСТВЕННЫЙ
-            if typeof(getloadedmodules) == "function" then
-                local LoadedOk, Loaded = pcall(getloadedmodules)
-                if LoadedOk and type(Loaded) == "table" then
-                    local Matches = {}
-                    for _, ModuleScript in Loaded do
-                        if ModuleScript.Name == TargetName
-                            and ModuleScript:IsA("LuaSourceContainer")
-                        then
-                            table.insert(Matches, ModuleScript)
-                        end
-                    end
-                    if #Matches == 1 then
-                        return Matches[1]
-                    end
-                end
+    --// Проход 1: точное совпадение GetFullName == Source
+    for _, List in Lists do
+        for _, S in List do
+            if not S:IsA("LuaSourceContainer") then continue end
+            local OkName, FullName = pcall(function() return S:GetFullName() end)
+            if OkName and FullName == Source then
+                return S
             end
         end
+    end
+
+    --// Проход 2: по имени — только если кандидат ЕДИНСТВЕННЫЙ
+    local Matches = {}
+    for _, List in Lists do
+        for _, S in List do
+            if not S:IsA("LuaSourceContainer") then continue end
+            if S.Name ~= TargetName then continue end
+            table.insert(Matches, S)
+        end
+    end
+    if #Matches == 1 then
+        return Matches[1]
     end
 
     return
 end
 
---// Хеш скрипта (getscripthash)
 function Process:GetScriptHash(Script: Instance): string?
     if typeof(Script) ~= "Instance" then return nil end
     if typeof(getscripthash) ~= "function" then return nil end
@@ -513,9 +483,9 @@ function Process:GetScriptHash(Script: Instance): string?
     return nil
 end
 
---// [FIX] Мягкая проверка: удалённый-но-загруженный модуль тоже считаем
---// доступным. Полностью мёртвый тоже разрешаем — pcall(getscriptbytecode)
---// сам вернёт ошибку, а Decompile покажет её текстом.
+--// [FIX] Мягкая проверка: не отсекаем удалённые (getscriptbytecode сам решит).
+--// Проверяем ВСЕ списки (не только getloadedmodules), чтобы учитывать
+--// и LocalScript/Script, а не только ModuleScript.
 function Process:IsScriptAvailable(Script: Instance): boolean
     if typeof(Script) ~= "Instance" then return false end
 
@@ -526,8 +496,28 @@ function Process:IsScriptAvailable(Script: Instance): boolean
         return true
     end
 
-    --// Не отсекаем удалённые: getscriptbytecode может отдать байткод
-    --// для require'd-модуля, уже удалённого из дерева.
+    local Lists = {}
+    if typeof(getloadedmodules) == "function" then
+        local Ok, L = pcall(getloadedmodules)
+        if Ok and type(L) == "table" then table.insert(Lists, L) end
+    end
+    if typeof(getrunningscripts) == "function" then
+        local Ok, L = pcall(getrunningscripts)
+        if Ok and type(L) == "table" then table.insert(Lists, L) end
+    end
+    if typeof(getscripts) == "function" then
+        local Ok, L = pcall(getscripts)
+        if Ok and type(L) == "table" then table.insert(Lists, L) end
+    end
+
+    for _, List in Lists do
+        for _, S in List do
+            if S == Script then
+                return true
+            end
+        end
+    end
+
     return true
 end
 
@@ -611,8 +601,6 @@ local ProcessCallback = newcclosure(function(Data: RemoteData, Remote, ...): tab
     }
 end)
 
---// [FIX] Выбор SourceScript/CallerScript по критерию (валидный Instance,
---// отличается от SourceScript), а не по индексам [1]/[2].
 function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
 	local Method = Data.Method
     local TransferType = Data.TransferType
@@ -641,7 +629,7 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         self:Merge(Data, ExtraData)
     end
 
-    --// [FIX] SourceScript = первый фрейм с валидным Instance;
+    --// SourceScript = первый фрейм с валидным Instance;
     --// CallerScript = первый после него с ДРУГИМ скриптом.
     if not IsReceive then
         local Closures = self:FindCallingClosures(6)
@@ -664,6 +652,42 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
                     CallerFunction = Closures[i]
                     CallerScript = S
                     break
+                end
+            end
+        end
+
+        --// [FIX] Fallback: если по стеку не нашли — по хешу getcallingscript()
+        --// среди ВСЕХ списков (ModuleScript/LocalScript/Script).
+        if not SourceScript then
+            local Calling = getcallingscript()
+            if typeof(Calling) == "Instance" and typeof(getscripthash) == "function" then
+                local OkH, H = pcall(getscripthash, Calling)
+                if OkH and H then
+                    local Lists = {}
+                    if typeof(getloadedmodules) == "function" then
+                        local Ok, L = pcall(getloadedmodules)
+                        if Ok and type(L) == "table" then table.insert(Lists, L) end
+                    end
+                    if typeof(getrunningscripts) == "function" then
+                        local Ok, L = pcall(getrunningscripts)
+                        if Ok and type(L) == "table" then table.insert(Lists, L) end
+                    end
+                    if typeof(getscripts) == "function" then
+                        local Ok, L = pcall(getscripts)
+                        if Ok and type(L) == "table" then table.insert(Lists, L) end
+                    end
+
+                    for _, List in Lists do
+                        for _, S in List do
+                            if not S:IsA("LuaSourceContainer") then continue end
+                            local OkSH, SH = pcall(getscripthash, S)
+                            if OkSH and SH == H then
+                                SourceScript = S
+                                break
+                            end
+                        end
+                        if SourceScript then break end
+                    end
                 end
             end
         end

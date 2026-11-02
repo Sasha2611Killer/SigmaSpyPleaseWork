@@ -1218,9 +1218,10 @@ function Ui:SetFocusedRemote(Data)
 		}
 	})
 
-	--// Хеш скрипта (getscripthash): SourceScript, иначе CallingScript.
-	--// Показывается в инфо-таблице, копируется кнопкой ниже.
-	local HashSource = Data.SourceScript or Data.CallerScript
+	--// Хеш скрипта (getscripthash): SourceScript → CallerScript →
+	--// CallingScript. Последний важен для ВХОДЯЩИХ логов (там Source/Caller
+	--// пустые, а CallingScript = скрипт, обрабатывающий событие).
+	local HashSource = Data.SourceScript or Data.CallerScript or Data.CallingScript
 	Data.ScriptHash = HashSource and Process:GetScriptHash(HashSource) or nil
 
 	--// Remote information table

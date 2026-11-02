@@ -1050,12 +1050,27 @@ function Ui:SetFocusedRemote(Data)
 
 		local DecompilePopout = Flags:GetFlagValue("DecompilePopout")
 		local ToDecompile = Data[WhichScript]
+		local UsedFallback = false
 
 		--// Fallback: SourceScript часто nil (env вызывающего closure без
 		--// глобала "script") — getscriptbytecode(nil) тогда падает с
 		--// "Failed to get script bytecode". Пробуем CallingScript.
+		--// Помечаем фолбэк в заголовке, чтобы не путать с реальным SourceScript.
 		if not ToDecompile and WhichScript == "SourceScript" then
 			ToDecompile = Data.CallingScript
+			UsedFallback = true
+		end
+
+		--// getcallingscript() может вернуть ссылку на УНИЧТОЖЕННЫЙ скрипт:
+		--// декомпил такого даст мусорную ошибку "Failed to get script bytecode".
+		if typeof(ToDecompile) == "Instance" then
+			local OkAlive, Alive = pcall(function()
+				return ToDecompile:IsDescendantOf(game)
+			end)
+			if not OkAlive or not Alive then
+				Ui:ShowModal({"The Script has been destroyed by the game (-9999999 AURA)"})
+				return
+			end
 		end
 
 		local Editor = CodeEditor
@@ -1063,6 +1078,9 @@ function Ui:SetFocusedRemote(Data)
 		--// Problem check
 		if not ScriptCheck(ToDecompile, true) then return end
 		local Task = Ui:FilterName(`Viewing: {ToDecompile}.lua`, 200)
+		if UsedFallback then
+			Task = `{Task} (via Calling)`
+		end
 		
 		--// Automatically Pop-out the editor for decompiling if enabled
 		if DecompilePopout then

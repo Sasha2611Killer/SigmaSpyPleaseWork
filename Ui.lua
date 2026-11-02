@@ -613,26 +613,6 @@ local function MakeActiveDataCallback(Name: string)
 	end
 end
 
---// TextBox с RichText=true не принимает ввод (удалять можно, печатать нет).
---// Принудительно снимаем RichText у всех TextBox редактора.
---// ReGui-элементы оборачивают Instance (обычно .Element) — перебираем все варианты.
-local function FixEditorTextboxes(Element)
-	local Root = Element
-	if type(Element) == "table" then
-		Root = Element.Element or Element.Instance or Element.Object or Element.Frame
-	end
-	if typeof(Root) ~= "Instance" then return end
-
-	for _, D in Root:GetDescendants() do
-		if D:IsA("TextBox") and D.RichText then
-			D.RichText = false
-		end
-	end
-	if Root:IsA("TextBox") and Root.RichText then
-		Root.RichText = false
-	end
-end
-
 function Ui:MakeEditorTab(InfoSelector)
 	local Default = self.DefaultEditorContent
 	local SyntaxColors = Config.SyntaxColors
@@ -704,9 +684,6 @@ function Ui:MakeEditorTab(InfoSelector)
 		}
 	})
 	
-	FixEditorTextboxes(CodeEditor)
-	FixEditorTextboxes(EditorTab)
-
 	self.CodeEditor = CodeEditor
 end
 
@@ -751,9 +728,6 @@ function Ui:MakeEditorPopoutWindow(Content: string, WindowConfig: table)
 		NoTable = true,
 		Buttons = Buttons
 	})
-
-	FixEditorTextboxes(CodeEditor)
-	FixEditorTextboxes(Window)
 
 	Window:Center()
 	return CodeEditor, Window

@@ -1218,6 +1218,25 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 		end
 	}
 
+	--// Скрипт-источник соединения: три захода (Cobalt-style):
+	--// 1) поле .Script от executor'а, 2) getscriptfromthread(Connection.Thread),
+	--// 3) env функции. getscriptfromthread определяет скрипт надёжнее env —
+	--// работает для C-closures и loadstring-обработчиков.
+	local function GetConnectionScript(Connection)
+		if typeof(Connection.Script) == "Instance" then
+			return Connection.Script
+		end
+
+		if Connection.Thread and typeof(getscriptfromthread) == "function" then
+			local Ok, Script = pcall(getscriptfromthread, Connection.Thread)
+			if Ok and typeof(Script) == "Instance" then
+				return Script
+			end
+		end
+
+		return Process:GetScriptFromFunc(Connection.Function)
+	end
+
 	--// Make headers on the table
 	self:MakeTableHeaders(Table, ToDisplay)
 
@@ -1228,7 +1247,9 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 			local Column = Row:NextColumn()
 			local ColumnRow = Column:Row()
 
-			local Value = Connection[Property]
+			local Value = Property == "Script"
+				and GetConnectionScript(Connection)
+				or Connection[Property]
 			local Callback = ButtonsForValues[Property]
 
 			--// Value label

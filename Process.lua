@@ -452,21 +452,37 @@ function Process:GetScriptFromFunc(Func: (...any) -> ...any)
                 table.insert(Candidates, getscripts())
             end
 
-            local Ok, Result = pcall(function()
-                for _, List in Candidates do
-                    for _, Script in List do
-                        if Script.Name == TargetName
-                            and Script:IsA("LuaSourceContainer")
-                            and Script:GetFullName() == Source
+            --// Поиск в два прохода:
+            --// 1) точное совпадение GetFullName (per-candidate pcall:
+            --//    удалённый скрипт бросает ошибку на GetFullName, и она
+            --//    НЕ должна обрывать весь поиск);
+            --// 2) для удалённых-но-загруженных модулей — сверка по имени
+            --//    среди getloadedmodules (полное имя недоступно).
+            for _, List in Candidates do
+                for _, Script in List do
+                    if Script.Name ~= TargetName then continue end
+                    if not Script:IsA("LuaSourceContainer") then continue end
+
+                    local OkName, FullName = pcall(function()
+                        return Script:GetFullName()
+                    end)
+                    if OkName and FullName == Source then
+                        return Script
+                    end
+                end
+            end
+
+            if typeof(getloadedmodules) == "function" then
+                local LoadedOk, Loaded = pcall(getloadedmodules)
+                if LoadedOk and type(Loaded) == "table" then
+                    for _, ModuleScript in Loaded do
+                        if ModuleScript.Name == TargetName
+                            and ModuleScript:IsA("LuaSourceContainer")
                         then
-                            return Script
+                            return ModuleScript
                         end
                     end
                 end
-                return nil
-            end)
-            if Ok and Result then
-                return Result
             end
         end
     end

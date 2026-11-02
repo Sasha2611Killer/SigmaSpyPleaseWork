@@ -305,7 +305,6 @@ function Process:IsProtectedRemote(Remote: Instance): boolean
 end
 
 function Process:RemoteAllowed(Remote: Event, TransferType: string, Method: string?): boolean?
-    -- ИСПРАВЛЕНО: убрана проверка InstanceCreatedRemotes[Remote]
     if typeof(Remote) ~= 'Instance' then return end
 
     --// Check if the Remote is protected
@@ -352,26 +351,37 @@ function Process:SetNewReturnSpoofs(NewReturnSpoofs: table)
     ReturnSpoofs = NewReturnSpoofs
 end
 
---// ВСЕ не-Sigma и не-C фреймы начиная с Offset (до 4 штук):
---// [1] — функция, вызвавшая remote (модуль-источник),
---// [2] — кто вызвал её (загрузчик/вызывающий скрипт).
-function Process:FindCallingClosures(Offset: number): {(...any) -> ...any}
+--// [FIX] ВСЕ не-Sigma и не-C Lua-фреймы, начиная с первого.
+--// Старая версия стартовала с (Offset - 2) и не отсекала C-функции/дубли,
+--// из-за чего SourceScript мог оказаться загрузчиком, C-функцией или nil.
+--// Теперь: старт с уровня 1, фильтр по [C] ДО getfenv, дедупликация, до 8.
+function Process:FindCallingClosures(_Offset: number): {(...any) -> ...any}
     local Getfenv = Hook:GetOriginalFunc(getfenv)
     local Result = {}
+    local Seen = {}
 
-    for Level = math.max(1, Offset - 2), Offset + 64 do
-        --// Конец стека — выходим (НЕ continue)
+    for Level = 1, 64 do
+        --// Конец стека — выходим
         if debug.info(Level, "l") == -1 then break end
 
         local Function = debug.info(Level, "f")
         if not Function then break end
+
+        --// Дубликат (newcclosure/trampoline) — пропускаем
+        if Seen[Function] then continue end
+        Seen[Function] = true
+
+        --// C-функция — отсекаем ДО getfenv (иначе getfenv может
+        --// вернуть env вызывающего и C-функция «притворится» игрой)
+        local SrcOk, Source = pcall(debug.info, Function, "s")
+        if SrcOk and Source == "[C]" then continue end
 
         local Success, Env = pcall(Getfenv, Function)
         if not Success then continue end
         if Env == SigmaENV then continue end
 
         table.insert(Result, Function)
-        if #Result >= 4 then break end
+        if #Result >= 8 then break end
     end
 
     return Result
@@ -419,12 +429,14 @@ function Process:Decompile(Script: LocalScript | ModuleScript): string
     return Responce.Body
 end
 
+--// [FIX] Хвост GetScriptFromFunc: второй проход по getloadedmodules
+--// возвращает ТОЛЬКО если кандидат единственный — иначе nil,
+--// чтобы не отдать чужой модуль с тем же именем.
 function Process:GetScriptFromFunc(Func: (...any) -> ...any)
     if not Func then return end
 
     local Success, ENV = pcall(getfenv, Func)
     if Success then
-        --// Blacklist sigma spy
         if not self:IsSigmaSpyENV(ENV) then
             local Script = rawget(ENV, "script")
             if typeof(Script) == "Instance" then
@@ -433,10 +445,8 @@ function Process:GetScriptFromFunc(Func: (...any) -> ...any)
         end
     end
 
-    --// Fallback: env без "script" (loadstring/обёртки). Имя чанка функции
-    --// в Roblox равно GetFullName скрипта. Ищем по: descendants +
-    --// getloadedmodules + getrunningscripts + getscripts — последние
-    --// видят скрипты, загруженные через другой скрипт и уже удалённые.
+    --// Fallback: env без "script". Имя чанка = GetFullName скрипта.
+    --// Ищем по descendants + getloadedmodules + getrunningscripts + getscripts.
     local SourceOk, Source = pcall(debug.info, Func, "s")
     if SourceOk and type(Source) == "string" and Source ~= "[C]" and #Source > 0 then
         local TargetName = Source:match("[%w_]+$")
@@ -452,12 +462,7 @@ function Process:GetScriptFromFunc(Func: (...any) -> ...any)
                 table.insert(Candidates, getscripts())
             end
 
-            --// Поиск в два прохода:
-            --// 1) точное совпадение GetFullName (per-candidate pcall:
-            --//    удалённый скрипт бросает ошибку на GetFullName, и она
-            --//    НЕ должна обрывать весь поиск);
-            --// 2) для удалённых-но-загруженных модулей — сверка по имени
-            --//    среди getloadedmodules (полное имя недоступно).
+            --// Проход 1: точное совпадение GetFullName (per-candidate pcall)
             for _, List in Candidates do
                 for _, Script in List do
                     if Script.Name ~= TargetName then continue end
@@ -472,15 +477,21 @@ function Process:GetScriptFromFunc(Func: (...any) -> ...any)
                 end
             end
 
+            --// Проход 2: для удалённых-но-загруженных — по имени,
+            --// только если кандидат ЕДИНСТВЕННЫЙ
             if typeof(getloadedmodules) == "function" then
                 local LoadedOk, Loaded = pcall(getloadedmodules)
                 if LoadedOk and type(Loaded) == "table" then
+                    local Matches = {}
                     for _, ModuleScript in Loaded do
                         if ModuleScript.Name == TargetName
                             and ModuleScript:IsA("LuaSourceContainer")
                         then
-                            return ModuleScript
+                            table.insert(Matches, ModuleScript)
                         end
+                    end
+                    if #Matches == 1 then
+                        return Matches[1]
                     end
                 end
             end
@@ -490,8 +501,7 @@ function Process:GetScriptFromFunc(Func: (...any) -> ...any)
     return
 end
 
---// Хеш скрипта (getscripthash) — стабильный идентификатор для сравнения
---// версий/источников скрипта. nil если executor не поддерживает.
+--// Хеш скрипта (getscripthash)
 function Process:GetScriptHash(Script: Instance): string?
     if typeof(Script) ~= "Instance" then return nil end
     if typeof(getscripthash) ~= "function" then return nil end
@@ -503,9 +513,9 @@ function Process:GetScriptHash(Script: Instance): string?
     return nil
 end
 
---// Доступен ли скрипт для декомпиля: живой ИЛИ загруженный-но-удалённый
---// (require'd скрипты остаются в памяти — getscriptbytecode их отдаёт).
---// Только полностью мёртвые ссылки считаем недоступными.
+--// [FIX] Мягкая проверка: удалённый-но-загруженный модуль тоже считаем
+--// доступным. Полностью мёртвый тоже разрешаем — pcall(getscriptbytecode)
+--// сам вернёт ошибку, а Decompile покажет её текстом.
 function Process:IsScriptAvailable(Script: Instance): boolean
     if typeof(Script) ~= "Instance" then return false end
 
@@ -516,34 +526,12 @@ function Process:IsScriptAvailable(Script: Instance): boolean
         return true
     end
 
-    local Lists = {}
-    if typeof(getloadedmodules) == "function" then
-        table.insert(Lists, getloadedmodules())
-    end
-    if typeof(getrunningscripts) == "function" then
-        table.insert(Lists, getrunningscripts())
-    end
-    if typeof(getscripts) == "function" then
-        table.insert(Lists, getscripts())
-    end
-
-    for _, List in Lists do
-        for _, S in List do
-            if S == Script then
-                return true
-            end
-        end
-    end
-
-    return false
+    --// Не отсекаем удалённые: getscriptbytecode может отдать байткод
+    --// для require'd-модуля, уже удалённого из дерева.
+    return true
 end
 
 function Process:ConnectionIsValid(Connection: table): boolean
-    --// ИЗМЕНЕНО: соединение валидно, если у него есть функция.
-    --// Скрипт-источник может быть неопределим (C-closures, loadstring,
-    --// executor-код) — Cobalt такие соединения всё равно показывает.
-    --// Старая версия фильтровала их по Script == nil → "0 connections"
-    --// для событий, которые точно кем-то обрабатывались.
     if Connection.Function == nil then
         return false
     end
@@ -554,10 +542,7 @@ end
 function Process:FilterConnections(Signal: RBXScriptSignal): table
     local Processed = {}
 
-    --// Filter each connection
     for _, Connection in getconnections(Signal) do
-        --// Пропускаем собственные логгер-функции спайа:
-        --// реестр по ссылке ИЛИ env-токен (Cobalt-style, переживает clonefunction)
         if self.LogConnectionFunctions[Connection.Function] then continue end
         if Hook.IsSpyConnectionFunction and Hook:IsSpyConnectionFunction(Connection.Function) then continue end
         if not self:ConnectionIsValid(Connection) then continue end
@@ -574,11 +559,9 @@ end
 function Process:GetRemoteData(Id: string)
     local RemoteOptions = self.RemoteOptions
 
-    --// Check for existing remote data
 	local Existing = RemoteOptions[Id]
 	if Existing then return Existing end
 
-    --// Base remote data
 	local Data = {
 		Excluded = false,
 		Blocked = false
@@ -611,45 +594,36 @@ function Process:PromptDiscordInvite(InviteCode: string)
 end
 
 local ProcessCallback = newcclosure(function(Data: RemoteData, Remote, ...): table?
-    --// Unpack Data
     local OriginalFunc = Data.OriginalFunc
     local Id = Data.Id
     local Method = Data.Method
 
-    --// Check if the Remote is Blocked
     local RemoteData = Process:GetRemoteData(Id)
     if RemoteData.Blocked then return {} end
 
-    --// Check for a spoof
     local Spoof = Process:GetRemoteSpoof(Remote, Method, OriginalFunc, ...)
     if Spoof then return Spoof end
 
-    --// Check if the orignal function was passed
     if not OriginalFunc then return end
 
-    --// Invoke orignal function
     return {
         OriginalFunc(Remote, ...)
     }
 end)
 
+--// [FIX] Выбор SourceScript/CallerScript по критерию (валидный Instance,
+--// отличается от SourceScript), а не по индексам [1]/[2].
 function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
-    --// Unpack Data
 	local Method = Data.Method
     local TransferType = Data.TransferType
     local IsReceive = Data.IsReceive
 
-	--// Check if the transfertype method is allowed
 	if TransferType and not self:RemoteAllowed(Remote, TransferType, Method) then return end
 
-    --// Fetch details
     local Id = Communication:GetDebugId(Remote)
     local ClassData = self:GetClassData(Remote)
     local Timestamp = tick()
 
-    --// Блок входящих (Cobalt-style): событие уже доставлено всем
-    --// соединениям, отменить его нельзя — но лог подавляем здесь,
-    --// а игровые обработчики отключаются через SetIncomingBlocked
     if IsReceive then
         local RemoteData = self:GetRemoteData(Id)
         if RemoteData.Blocked then
@@ -659,25 +633,42 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
 
     local CallingFunction
     local SourceScript
+    local CallerScript = nil
+    local CallerFunction = nil
 
-    --// Add extra data into the log if needed
     local ExtraData = self.ExtraData
     if ExtraData then
         self:Merge(Data, ExtraData)
     end
 
-    --// Get caller information: [1] = модуль-источник вызова, [2] = загрузчик
-    local CallerScript = nil
+    --// [FIX] SourceScript = первый фрейм с валидным Instance;
+    --// CallerScript = первый после него с ДРУГИМ скриптом.
     if not IsReceive then
         local Closures = self:FindCallingClosures(6)
-        CallingFunction = Closures[1]
-        local CallerFunction = Closures[2]
 
-        SourceScript = CallingFunction and self:GetScriptFromFunc(CallingFunction) or nil
-        CallerScript = CallerFunction and self:GetScriptFromFunc(CallerFunction) or nil
+        local SourceIndex = nil
+        for i, F in Closures do
+            local S = self:GetScriptFromFunc(F)
+            if typeof(S) == "Instance" then
+                CallingFunction = F
+                SourceScript = S
+                SourceIndex = i
+                break
+            end
+        end
+
+        if SourceIndex then
+            for i = SourceIndex + 1, #Closures do
+                local S = self:GetScriptFromFunc(Closures[i])
+                if typeof(S) == "Instance" and S ~= SourceScript then
+                    CallerFunction = Closures[i]
+                    CallerScript = S
+                    break
+                end
+            end
+        end
     end
 
-    --// Add to queue
     self:Merge(Data, {
         Remote = cloneref(Remote),
 		CallingScript = getcallingscript(),
@@ -690,11 +681,9 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         Args = {...}
     })
 
-    --// Invoke the Remote and log return values
     local ReturnValues = ProcessCallback(Data, Remote, ...)
     Data.ReturnValues = ReturnValues
 
-    --// Queue log
     Communication:QueueLog(Data)
 
     return ReturnValues
@@ -707,8 +696,6 @@ function Process:SetAllRemoteData(Key: string, Value)
 	end
 end
 
---// The communication creates a different table address
---// Recived tables will not be the same
 function Process:SetRemoteData(Id: string, RemoteData: table)
     local RemoteOptions = self.RemoteOptions
     RemoteOptions[Id] = RemoteData
@@ -722,13 +709,10 @@ function Process:UpdateAllRemoteData(Key: string, Value)
     Communication:Communicate("AllRemoteData", Key, Value)
 end
 
---// Блок входящих событий (Cobalt Log:SetConnectionsEnabled):
---// отключаем/включаем ИГРОВЫЕ соединения сигнала. Собственные
---// логгер-колбэки пропускаем (реестр + env-токен).
 function Process:SetIncomingBlocked(Remote: Instance, Blocked: boolean)
     local ClassData = self:GetClassData(Remote)
     if not ClassData then return end
-    if ClassData.IsRemoteFunction then return end -- у функций детур, не сигнал
+    if ClassData.IsRemoteFunction then return end
     if ClassData.NoReciveHook then return end
 
     local Method = ClassData.Receive[1]

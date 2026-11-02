@@ -353,35 +353,33 @@ end
 
 --// [FIX] ВСЕ не-Sigma Lua-фреймы + script-хинты с C-фреймов.
 --// Probe v6 (2026-11-03): стек на Delta ДОСТУПЕН. C-фреймы имеют l == -1,
---// но это НЕ конец стека — идём дальше, пока debug.info(Level,"f") не nil.
---// C-фреймы в Result не добавляем, но их env.script (скрипт игры =
---// владелец потока/загрузчик) собираем в Hints по порядку.
-function Process:FindCallingClosures(_Offset: number?, Probe: table?): (table, table)
+--// но это НЕ конец стека — идём, пока debug.info(Level,"f") не nil.
+--// C-фреймы в Result не добавляем, но их env.script (владелец потока/
+--// загрузчик) собираем в Hints. identity 8 поднимается ЛЕНИВО — только
+--// если getfenv упал (обычно не падает — нет лишних переключений на
+--// каждый вызов ремоута). Страховка на executor'ы без identity-функций.
+function Process:FindCallingClosures(_Offset: number?): (table, table)
     local Getfenv = Hook:GetOriginalFunc(getfenv)
     local Result = {}
     local Hints = {}
     local Seen = {}
 
-    local function AddProbe(Line: string)
-        if Probe then
-            table.insert(Probe, Line)
-        end
-    end
+    local HasIdentity = typeof(getthreadidentity) == "function"
+        and typeof(setthreadidentity) == "function"
+    local Identity = HasIdentity and getthreadidentity() or nil
+    local Raised = false
 
-    local Identity = getthreadidentity()
-    setthreadidentity(8)
+    local function RaiseIdentity()
+        if Raised or not HasIdentity then return end
+        Raised = true
+        setthreadidentity(8)
+    end
 
     for Level = 1, 16 do
         local Function = debug.info(Level, "f")
-        if not Function then
-            AddProbe(`L{Level}: REAL end of stack`)
-            break
-        end
+        if not Function then break end
 
-        if Seen[Function] then
-            AddProbe(`L{Level}: duplicate`)
-            continue
-        end
+        if Seen[Function] then continue end
         Seen[Function] = true
 
         local Source = debug.info(Function, "s")
@@ -389,13 +387,13 @@ function Process:FindCallingClosures(_Offset: number?, Probe: table?): (table, t
 
         local Success, Env = pcall(Getfenv, Function)
         if not Success then
-            AddProbe(`L{Level}: getfenv FAIL: {Env}`)
-            continue
+            --// Ленивый подъём identity: второй шанс для getfenv
+            RaiseIdentity()
+            Success, Env = pcall(Getfenv, Function)
+            if not Success then continue end
         end
-        if Env == SigmaENV then
-            AddProbe(`L{Level}: SigmaENV skip`)
-            continue
-        end
+
+        if Env == SigmaENV then continue end
 
         --// script-хинт с ЛЮБОГО не-Sigma фрейма (C-фреймы Delta
         --// несут env.script игры — это загрузчик/владелец потока)
@@ -403,24 +401,22 @@ function Process:FindCallingClosures(_Offset: number?, Probe: table?): (table, t
             local ScriptHint = rawget(Env, "script")
             if typeof(ScriptHint) == "Instance" then
                 table.insert(Hints, ScriptHint)
-                AddProbe(`L{Level}: hint {ScriptHint} ({IsC and "C" or "lua"})`)
             end
         end
 
         --// C-фреймы как closures не подходят (нет Lua-локалов/констант)
-        if IsC then
-            AddProbe(`L{Level}: [C] skip (hint saved)`)
-            continue
-        end
+        if IsC then continue end
 
-        AddProbe(`L{Level}: OK closure ({Source})`)
         table.insert(Result, Function)
         if #Result >= 8 then break end
     end
 
-    setthreadidentity(Identity)
+    if Raised then
+        setthreadidentity(Identity)
+    end
     return Result, Hints
 end
+
 --// Обратная совместимость: первый (ближайший) вызывающий closure
 function Process:FindCallingLClosure(Offset: number)
     return self:FindCallingClosures(Offset)[1]
@@ -667,7 +663,6 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     local SourceScript
     local CallerScript = nil
     local CallerFunction = nil
-    local StackProbe = nil
 
     local ExtraData = self.ExtraData
     if ExtraData then
@@ -678,8 +673,7 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     --// CallerScript = первый хинт/скрипт, отличный от SourceScript
     --// (C-фрейм на Delta несёт env.script загрузчика = Framework).
     if not IsReceive then
-        StackProbe = {}
-        local Closures, Hints = self:FindCallingClosures(6, StackProbe)
+        local Closures, Hints = self:FindCallingClosures(6)
 
         local SourceIndex = nil
         for i, F in Closures do
@@ -723,7 +717,6 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         --// Fallback: если стек пуст — getcallingscript() (владелец потока)
         SourceScript = SourceScript or CallingScript,
         CallerScript = CallerScript,
-        StackProbe = StackProbe,
         Id = Id,
 		ClassData = ClassData,
         Timestamp = Timestamp,

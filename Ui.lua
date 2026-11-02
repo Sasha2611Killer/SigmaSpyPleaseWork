@@ -966,8 +966,8 @@ function Ui:SetFocusedRemote(Data)
 	function Data:ScriptOptions(Button: GuiButton)
 		Ui:MakeButtonMenu(Button, {self}, {
 			["Caller Info"] = DataConnection("GenerateInfo"),
-			["Decompile (source)"] = DataConnection("Decompile", "SourceScript"),
-			["Decompile Caller (loader)"] = DataConnection("Decompile", "CallingScript"),
+			["Decompile"] = DataConnection("Decompile", "SourceScript"),
+			["Decompile Calling"] = DataConnection("Decompile", "CallingScript"),
 			["Repeat Call"] = DataConnection("RepeatCall"),
 			["Save Bytecode"] = DataConnection("SaveBytecode"),
 		})

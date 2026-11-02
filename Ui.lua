@@ -1079,6 +1079,11 @@ function Ui:SetFocusedRemote(Data)
 	xpcall(function()
 		self:CreateOptionsForDict(Tab, RemoteData, function()
 			Process:UpdateRemoteData(Id, RemoteData)
+			--// Блок входящих: реально отключаем игровые соединения
+			--// сигнала (Cobalt-style), а не только помечаем флагом
+			pcall(function()
+				Process:SetIncomingBlocked(Remote, RemoteData.Blocked == true)
+			end)
 		end)
 	end, function(Err)
 		warn("SigmaSpy RemoteOptions:", tostring(Err):sub(1, 200))

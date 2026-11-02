@@ -669,11 +669,15 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         end
     end
 
+local CallingScript = getcallingscript()
     self:Merge(Data, {
         Remote = cloneref(Remote),
-		CallingScript = getcallingscript(),
+		CallingScript = CallingScript,
         CallingFunction = CallingFunction,
-        SourceScript = SourceScript,
+        --// [FIX] Fallback: обход стека на Delta не всегда резолвит
+        --// SourceScript, а getcallingscript() видит вызывающий скрипт.
+        --// Лучше загрузчик, чем пустой хеш и мёртвый Decompile.
+        SourceScript = SourceScript or CallingScript,
         CallerScript = CallerScript,
         Id = Id,
 		ClassData = ClassData,

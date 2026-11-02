@@ -352,12 +352,11 @@ function Process:SetNewReturnSpoofs(NewReturnSpoofs: table)
 end
 
 --// [FIX] ВСЕ не-Sigma и не-C Lua-фреймы, начиная с первого.
---// Старая версия стартовала с (Offset - 2) и не отсекала C-функции/дубли,
---// из-за чего SourceScript мог оказаться загрузчиком, C-функцией или nil.
 --// Теперь: старт с уровня 1, фильтр по [C] ДО getfenv, дедупликация, до 8.
---// [FIX 2026-11-03] getfenv читается под identity 8: на Delta обход стека
---// возвращал 0 фреймов, т.к. getfenv(игровое замыкание) падает с
---// identity executor'а. Плюс Probe: сырые записи по уровням для Caller Info.
+--// [FIX 2026-11-03] getfenv читается под identity 8 (на Delta падает с
+--// identity executor'а). ВАЖНО: debug.info звать НАПРЯМУЮ, без pcall —
+--// через pcall уровень 1 = сам pcall ([C], l == -1) и обход мгновенно
+--// завершается. Probe (опционально): сырые записи по уровням для Caller Info.
 function Process:FindCallingClosures(_Offset: number?, Probe: table?): {(...any) -> ...any}
     local Getfenv = Hook:GetOriginalFunc(getfenv)
     local Result = {}
@@ -374,15 +373,16 @@ function Process:FindCallingClosures(_Offset: number?, Probe: table?): {(...any)
     setthreadidentity(8)
 
     for Level = 1, 12 do
-        --// Конец стека — выходим
-        local LineOk, CurrentLine = pcall(debug.info, Level, "l")
-        if not LineOk or CurrentLine == -1 then
+        --// Конец стека — выходим. debug.info напрямую: за пределами
+        --// стека "l" даёт -1, "f" даёт nil (без ошибок).
+        local CurrentLine = debug.info(Level, "l")
+        if CurrentLine == -1 then
             AddProbe(`L{Level}: end of stack`)
             break
         end
 
-        local FuncOk, Function = pcall(debug.info, Level, "f")
-        if not FuncOk or not Function then
+        local Function = debug.info(Level, "f")
+        if not Function then
             AddProbe(`L{Level}: no function`)
             break
         end
@@ -396,8 +396,8 @@ function Process:FindCallingClosures(_Offset: number?, Probe: table?): {(...any)
 
         --// C-функция — отсекаем ДО getfenv (иначе getfenv может
         --// вернуть env вызывающего и C-функция «притворится» игрой)
-        local SrcOk, Source = pcall(debug.info, Function, "s")
-        if SrcOk and Source == "[C]" then
+        local Source = debug.info(Function, "s")
+        if Source == "[C]" then
             AddProbe(`L{Level}: [C] skip`)
             continue
         end
@@ -412,7 +412,7 @@ function Process:FindCallingClosures(_Offset: number?, Probe: table?): {(...any)
             continue
         end
 
-        AddProbe(`L{Level}: OK ({SrcOk and Source or "?"})`)
+        AddProbe(`L{Level}: OK ({Source})`)
         table.insert(Result, Function)
         if #Result >= 8 then break end
     end

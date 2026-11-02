@@ -220,15 +220,58 @@ end
 function Hook:RunOnActors(Code: string, ChannelId: number)
 	if not getactors or not run_on_actor then return end
 
+	--// Cobalt-style ретрай: run_on_actor может падать на неинициализированных
+	--// акторах (LuaStateProxy) — повторяем до 10 раз с паузой
 	local function HookActor(Actor)
-		pcall(run_on_actor, Actor, Code, ChannelId)
+		task.spawn(function()
+			local Hooked = false
+			local Attempts = 0
+			repeat
+				Hooked = pcall(run_on_actor, Actor, Code, ChannelId)
+				Attempts += 1
+				if not Hooked then
+					task.wait(0.25)
+				end
+			until Hooked or Attempts > 10
+		end)
+	end
+
+	--// Современная библиотека: getactorstates может возвращать НЕ Actor-инстансы,
+	--// а состояния — треды (run_on_thread) или LuaStateProxy (:Execute).
+	--// Классический getactors() такие акторы не видит.
+	local SkipClassic = false
+	if typeof(getactorstates) == "function" then
+		local Ok, States = pcall(getactorstates)
+		if Ok and type(States) == "table" then
+			local First = next(States)
+			if type(First) == "thread" and typeof(run_on_thread) == "function" then
+				for _, State in States do
+					pcall(run_on_thread, State, Code, ChannelId)
+				end
+				SkipClassic = true -- состояния захуканы — getactors-проход не нужен
+			elseif (type(First) == "userdata" or type(First) == "table") and First.IsActorState then
+				local HookedAny = false
+				for _, Proxy in States do
+					if not Proxy.IsActorState then continue end
+					local OkH = pcall(function()
+						return Proxy:Execute(Code, ChannelId, Proxy:GetActors()[1])
+					end)
+					HookedAny = HookedAny or OkH
+				end
+				if HookedAny then
+					SkipClassic = true
+				end
+			end
+		end
 	end
 
 	--// Текущие + удалённые (неинициализированные) акторы — как в Cobalt
-	for _, Category in {getactors(), typeof(getdeletedactors) == "function" and getdeletedactors() or {}} do
-		if Category then
-			for _, Actor in next, Category do
-				HookActor(Actor)
+	if not SkipClassic then
+		for _, Category in {getactors(), typeof(getdeletedactors) == "function" and getdeletedactors() or {}} do
+			if Category then
+				for _, Actor in next, Category do
+					HookActor(Actor)
+				end
 			end
 		end
 	end

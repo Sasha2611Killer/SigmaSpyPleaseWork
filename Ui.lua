@@ -37,6 +37,7 @@ local Ui = {
 		"Remote",
 		"CallingScript",
 		"IsActor",
+		"ScriptHash",
 		"Id"
 	},
 
@@ -899,6 +900,9 @@ function Ui:SetFocusedRemote(Data)
 	local TableArgs = Flags:GetFlagValue("TableArgs")
 	local NoVariables = Flags:GetFlagValue("NoVariables")
 
+	--// IsActor нормализуем в явный boolean (иначе в таблице пустота)
+	Data.IsActor = Data.IsActor == true
+
 	--// Unpack info
 	local RemoteData = Process:GetRemoteData(Id)
 	local IsRemoteFunction = ClassData.IsRemoteFunction
@@ -1043,7 +1047,16 @@ function Ui:SetFocusedRemote(Data)
 		--// для каждого (Cobalt-style attribution)
 		if IsReceive then
 			local RecvMethod = ClassData.Receive[1]
-			local Signal = Hook:Index(Remote, RecvMethod)
+			local Signal
+			if IsRemoteFunction then
+				--// OnClientInvoke — callback-значение: читать Remote[..]
+				--// запрещено движком ("get is not available") — только
+				--// getcallbackvalue
+				local Ok, CallbackValue = pcall(getcallbackvalue, Remote, RecvMethod)
+				Signal = Ok and CallbackValue or nil
+			else
+				Signal = Hook:Index(Remote, RecvMethod)
+			end
 			Ui:ViewConnections(RemoteName, Signal)
 			return
 		end
@@ -1061,16 +1074,11 @@ function Ui:SetFocusedRemote(Data)
 			UsedFallback = true
 		end
 
-		--// getcallingscript() может вернуть ссылку на УНИЧТОЖЕННЫЙ скрипт:
-		--// декомпил такого даст мусорную ошибку "Failed to get script bytecode".
-		if typeof(ToDecompile) == "Instance" then
-			local OkAlive, Alive = pcall(function()
-				return ToDecompile:IsDescendantOf(game)
-			end)
-			if not OkAlive or not Alive then
-				Ui:ShowModal({"The Script has been destroyed by the game (-9999999 AURA)"})
-				return
-			end
+		--// Полностью мёртвые ссылки отсекаем, НО загруженные-через-другой-
+		--// скрипт-и-удалённые остаются доступными (getscriptbytecode их отдаёт)
+		if typeof(ToDecompile) == "Instance" and not Process:IsScriptAvailable(ToDecompile) then
+			Ui:ShowModal({"The Script has been destroyed by the game (-9999999 AURA)"})
+			return
 		end
 
 		local Editor = CodeEditor
@@ -1115,12 +1123,33 @@ function Ui:SetFocusedRemote(Data)
 		},
 		Buttons = {
 			{
+				Text = "Copy script hash",
+				Callback = function()
+					SetClipboard(Data.ScriptHash or "N/A (hash unavailable)")
+				end,
+			},
+			{
 				Text = "Copy script path",
 				Callback = function()
-					SetClipboard(Parser:MakePathString({
-						Object = Script,
-						NoVariables = true
-					}))
+					--// CallingScript может быть nil/уничтожен —
+					--// фолбэк на SourceScript, затем tostring
+					local Target = Script
+					if typeof(Target) ~= "Instance" then
+						Target = Data.SourceScript
+					end
+
+					local Ok, Path = pcall(function()
+						return Parser:MakePathString({
+							Object = Target,
+							NoVariables = true
+						})
+					end)
+
+					if Ok and Path then
+						SetClipboard(Path)
+					else
+						SetClipboard(tostring(Target))
+					end
 				end,
 			},
 			{
@@ -1152,13 +1181,26 @@ function Ui:SetFocusedRemote(Data)
 			{
 				Text = "View Connections",
 				Callback = function()
-					local Method = ClassData.Receive[1]
-					local Signal = Remote[Method]
+					local RecvMethod = ClassData.Receive[1]
+					local Signal
+					if IsRemoteFunction then
+						--// Чтение OnClientInvoke запрещено движком —
+						--// только getcallbackvalue
+						local Ok, CallbackValue = pcall(getcallbackvalue, Remote, RecvMethod)
+						Signal = Ok and CallbackValue or nil
+					else
+						Signal = Remote[RecvMethod]
+					end
 					self:ViewConnections(RemoteName, Signal)
 				end,
 			}
 		}
 	})
+
+	--// Хеш скрипта (getscripthash): SourceScript, иначе CallingScript.
+	--// Показывается в инфо-таблице, копируется кнопкой ниже.
+	local HashSource = Data.SourceScript or Data.CallingScript
+	Data.ScriptHash = HashSource and Process:GetScriptHash(HashSource) or nil
 
 	--// Remote information table
 	self:DisplayTable(Tab, {

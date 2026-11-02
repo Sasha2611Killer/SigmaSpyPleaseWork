@@ -25,6 +25,7 @@ local Process = {
             Send = {
                 "FireServer",
                 "fireServer",
+				"fireserver",
             },
             Receive = {
                 "OnClientEvent",
@@ -35,6 +36,7 @@ local Process = {
             Send = {
                 "InvokeServer",
                 "invokeServer",
+				"invokeserver",
             },
             Receive = {
                 "OnClientInvoke",
@@ -44,6 +46,7 @@ local Process = {
             Send = {
                 "FireServer",
                 "fireServer",
+				"fireserver",
             },
             Receive = {
                 "OnClientEvent",
@@ -53,6 +56,7 @@ local Process = {
             NoReciveHook = true,
             Send = {
                 "Fire",
+				"fire",
             },
             Receive = {
                 "Event",
@@ -63,6 +67,7 @@ local Process = {
             NoReciveHook = true,
             Send = {
                 "Invoke",
+				"invoke",
             },
             Receive = {
                 "OnInvoke",

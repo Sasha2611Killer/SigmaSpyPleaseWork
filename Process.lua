@@ -564,6 +564,16 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     local ClassData = self:GetClassData(Remote)
     local Timestamp = tick()
 
+    --// Блок входящих (Cobalt-style): событие уже доставлено всем
+    --// соединениям, отменить его нельзя — но лог подавляем здесь,
+    --// а игровые обработчики отключаются через SetIncomingBlocked
+    if IsReceive then
+        local RemoteData = self:GetRemoteData(Id)
+        if RemoteData.Blocked then
+            return
+        end
+    end
+
     local CallingFunction
     local SourceScript
 
@@ -621,6 +631,30 @@ end
 
 function Process:UpdateAllRemoteData(Key: string, Value)
     Communication:Communicate("AllRemoteData", Key, Value)
+end
+
+--// Блок входящих событий (Cobalt Log:SetConnectionsEnabled):
+--// отключаем/включаем ИГРОВЫЕ соединения сигнала. Собственные
+--// логгер-колбэки пропускаем (реестр + env-токен).
+function Process:SetIncomingBlocked(Remote: Instance, Blocked: boolean)
+    local ClassData = self:GetClassData(Remote)
+    if not ClassData then return end
+    if ClassData.IsRemoteFunction then return end -- у функций детур, не сигнал
+    if ClassData.NoReciveHook then return end
+
+    local Method = ClassData.Receive[1]
+    local Signal = Hook:Index(Remote, Method)
+
+    for _, Connection in getconnections(Signal) do
+        if self.LogConnectionFunctions[Connection.Function] then continue end
+        if Hook.IsSpyConnectionFunction and Hook:IsSpyConnectionFunction(Connection.Function) then continue end
+
+        if Blocked then
+            Connection:Disable()
+        else
+            Connection:Enable()
+        end
+    end
 end
 
 return Process

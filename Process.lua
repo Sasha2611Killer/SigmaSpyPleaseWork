@@ -355,38 +355,71 @@ end
 --// Старая версия стартовала с (Offset - 2) и не отсекала C-функции/дубли,
 --// из-за чего SourceScript мог оказаться загрузчиком, C-функцией или nil.
 --// Теперь: старт с уровня 1, фильтр по [C] ДО getfenv, дедупликация, до 8.
-function Process:FindCallingClosures(_Offset: number): {(...any) -> ...any}
+--// [FIX 2026-11-03] getfenv читается под identity 8: на Delta обход стека
+--// возвращал 0 фреймов, т.к. getfenv(игровое замыкание) падает с
+--// identity executor'а. Плюс Probe: сырые записи по уровням для Caller Info.
+function Process:FindCallingClosures(_Offset: number?, Probe: table?): {(...any) -> ...any}
     local Getfenv = Hook:GetOriginalFunc(getfenv)
     local Result = {}
     local Seen = {}
 
-    for Level = 1, 64 do
-        --// Конец стека — выходим
-        if debug.info(Level, "l") == -1 then break end
+    local function AddProbe(Line: string)
+        if Probe then
+            table.insert(Probe, Line)
+        end
+    end
 
-        local Function = debug.info(Level, "f")
-        if not Function then break end
+    --// Весь обход — под identity 8 (как Hook:Index)
+    local Identity = getthreadidentity()
+    setthreadidentity(8)
+
+    for Level = 1, 12 do
+        --// Конец стека — выходим
+        local LineOk, CurrentLine = pcall(debug.info, Level, "l")
+        if not LineOk or CurrentLine == -1 then
+            AddProbe(`L{Level}: end of stack`)
+            break
+        end
+
+        local FuncOk, Function = pcall(debug.info, Level, "f")
+        if not FuncOk or not Function then
+            AddProbe(`L{Level}: no function`)
+            break
+        end
 
         --// Дубликат (newcclosure/trampoline) — пропускаем
-        if Seen[Function] then continue end
+        if Seen[Function] then
+            AddProbe(`L{Level}: duplicate`)
+            continue
+        end
         Seen[Function] = true
 
         --// C-функция — отсекаем ДО getfenv (иначе getfenv может
         --// вернуть env вызывающего и C-функция «притворится» игрой)
         local SrcOk, Source = pcall(debug.info, Function, "s")
-        if SrcOk and Source == "[C]" then continue end
+        if SrcOk and Source == "[C]" then
+            AddProbe(`L{Level}: [C] skip`)
+            continue
+        end
 
         local Success, Env = pcall(Getfenv, Function)
-        if not Success then continue end
-        if Env == SigmaENV then continue end
+        if not Success then
+            AddProbe(`L{Level}: getfenv FAIL: {Env}`)
+            continue
+        end
+        if Env == SigmaENV then
+            AddProbe(`L{Level}: SigmaENV skip`)
+            continue
+        end
 
+        AddProbe(`L{Level}: OK ({SrcOk and Source or "?"})`)
         table.insert(Result, Function)
         if #Result >= 8 then break end
     end
 
+    setthreadidentity(Identity)
     return Result
 end
-
 --// Обратная совместимость: первый (ближайший) вызывающий closure
 function Process:FindCallingLClosure(Offset: number)
     return self:FindCallingClosures(Offset)[1]
@@ -635,6 +668,7 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     local SourceScript
     local CallerScript = nil
     local CallerFunction = nil
+    local StackProbe = nil
 
     local ExtraData = self.ExtraData
     if ExtraData then
@@ -643,8 +677,10 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
 
     --// [FIX] SourceScript = первый фрейм с валидным Instance;
     --// CallerScript = первый после него с ДРУГИМ скриптом.
+    --// StackProbe — диагностика стека для Caller Info.
     if not IsReceive then
-        local Closures = self:FindCallingClosures(6)
+        StackProbe = {}
+        local Closures = self:FindCallingClosures(6, StackProbe)
 
         local SourceIndex = nil
         for i, F in Closures do
@@ -669,16 +705,16 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         end
     end
 
-local CallingScript = getcallingscript()
+    local CallingScript = getcallingscript()
     self:Merge(Data, {
         Remote = cloneref(Remote),
 		CallingScript = CallingScript,
         CallingFunction = CallingFunction,
         --// [FIX] Fallback: обход стека на Delta не всегда резолвит
         --// SourceScript, а getcallingscript() видит вызывающий скрипт.
-        --// Лучше загрузчик, чем пустой хеш и мёртвый Decompile.
         SourceScript = SourceScript or CallingScript,
         CallerScript = CallerScript,
+        StackProbe = StackProbe,
         Id = Id,
 		ClassData = ClassData,
         Timestamp = Timestamp,

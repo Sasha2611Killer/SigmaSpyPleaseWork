@@ -358,9 +358,11 @@ function Process:FindCallingLClosure(Offset: number)
     --// ИСПРАВЛЕН стартовый уровень: раньше скан начинался с Offset+2
     --// и ПРОПУСКАЛ фрейм реального вызывающего (например, функции
     --// ClientCore) — находился скрипт на фрейм выше (loader-чанк).
-    --// Первый не-Sigma и не-C фрейм начиная с Offset — и есть
-    --// вызывающий игровой код. break при конце стека + лимит 64.
-    for Level = Offset, Offset + 64 do
+    --// Старт НИЖЕ Offset: у части executor'ов (Delta) цепочка фреймов
+    --// глубже расчётной, и реальный вызывающий лежит ниже. Лишние
+    --// фреймы (wrapper Sigma-env, C-трамплины) всё равно пропускаются.
+    --// Первый не-Sigma и не-C фрейм — вызывающий игровой код.
+    for Level = math.max(1, Offset - 2), Offset + 64 do
         --// Конец стека — выходим (НЕ continue)
         if debug.info(Level, "l") == -1 then break end
 

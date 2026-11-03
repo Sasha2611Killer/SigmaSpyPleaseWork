@@ -137,20 +137,19 @@ function Hook:PatchFunctions()
 	--// Check if this function is disabled in the configuration
 	if Configuration.NoFunctionPatching or Config.NoFunctionPatching then return end
 
-	--// [FIX 2026-11-03] CleanCError УБРАН: он переписывал текст КАЖДОЙ
-	--// ошибки в игре ("invalid argument"→"missing argument", вырезал
-	--// ":NN:" и ", got X") — игры-пробники ловят расхождение строк.
-	--// Оставлен только stack-overflow патч (редкий, не трогает
-	--// обычные ошибки). oth-путь сохранён.
-	local UseOth = typeof(oth) == "table" and typeof(oth.hook) == "function"
-		and Configuration.UseOthHooks ~= false
+	--// [FIX 2026-11-03] КЛАССИКА + clonefunction-защита. oth УБРАН:
+	--// тест в игре — классический hookfunction(pcall) пасsthrough 5 мин
+	--// без кика; oth.hook(pcall) кикал (у игры рекурсионный пробник
+	--// глубины стека). CleanCError не возвращаем.
+	local _hookfunction = clonefunction(hookfunction)
+	local _clonefunction = clonefunction(clonefunction)
 
 	local Patches = {
 		[pcall] = function(OldFunc, Func, ...)
 			local Responce = {OldFunc(Func, ...)}
 			local Success, Error = Responce[1], Responce[2]
 
-			--// Только C stack overflow: обычные ошибки НЕ трогаем
+			--// Только C stack overflow; обычные ошибки не трогаем
 			if Success == false and type(Error) == "string"
 				and not iscclosure(Func) and Error:find("C stack overflow")
 			then
@@ -185,28 +184,18 @@ function Hook:PatchFunctions()
 		end
 	}
 
+	--// Hook each function
 	for Func, CallBack in Patches do
-		if Func == getfenv and UseOth then
-			continue
-		end
-
+		local Original = _clonefunction(Func)
 		local Wrapped = newcclosure(CallBack)
 
-		if UseOth then
-			local OldFunc
-			OldFunc = oth.hook(Func, function(...)
-				return Wrapped(OldFunc, ...)
-			end)
-			self.PreviousFunctions[Func] = OldFunc
-		else
-			local OldFunc; OldFunc = self:HookFunction(Func, function(...)
-				return Wrapped(OldFunc, ...)
-			end)
-			self.PreviousFunctions[Func] = OldFunc
-		end
+		_hookfunction(Func, function(...)
+			return Wrapped(Original, ...)
+		end)
+
+		self.PreviousFunctions[Func] = Original
 	end
 end
-
 
 function Hook:GetOriginalFunc(Func)
 	return self.PreviousFunctions[Func] or Func

@@ -658,7 +658,14 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
 
 	if TransferType and not self:RemoteAllowed(Remote, TransferType, Method) then return end
 
-    local Id = Communication:GetDebugId(Remote)
+    local Id
+	do
+		local identity = getthreadidentity()
+		setthreadidentity(8)
+		local OkDid, Did = pcall(Remote.GetDebugId, Remote)
+		setthreadidentity(identity)
+		Id = (OkDid and Did) or tostring(Remote):sub(-12)
+	end
     local ClassData = self:GetClassData(Remote)
     local Timestamp = tick()
 

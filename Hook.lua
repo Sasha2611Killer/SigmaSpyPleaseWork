@@ -138,7 +138,14 @@ end
 --// By the way, thanks for copying this guys! Super appreciate the copycat
 function Hook:PatchFunctions()
 	--// Check if this function is disabled in the configuration
-	if Config.NoFunctionPatching then return end
+	if Configuration.NoFunctionPatching or Config.NoFunctionPatching then return end
+
+	--// [ANTI-DETECT] oth-патчи: pcall через oth.hook (отдельный тред) —
+	--// невидим для function-hooks-детектов (тест 2026-11-03: pcall жив,
+	--// кика нет). getfenv-патч под oth НЕ работает (завязан на
+	-- checkcaller() и глубину стека хук-трамплина) — только классический путь.
+	local UseOth = typeof(oth) == "table" and typeof(oth.hook) == "function"
+		and Configuration.UseOthHooks ~= false
 
 	local Patches = {
 		--// Error detection patch
@@ -191,13 +198,24 @@ function Hook:PatchFunctions()
 
 	--// Hook each function
 	for Func, CallBack in Patches do
-		local Wrapped = newcclosure(CallBack)
-		local OldFunc; OldFunc = self:HookFunction(Func, function(...)
-			return Wrapped(OldFunc, ...)
-		end)
+		if Func == getfenv and UseOth then
+			continue --// getfenv-патч под oth некорректен (см. выше)
+		end
 
-		--// Cache previous function
-		self.PreviousFunctions[Func] = OldFunc
+		local Wrapped = newcclosure(CallBack)
+
+		if UseOth then
+			local OldFunc
+			OldFunc = oth.hook(Func, function(...)
+				return Wrapped(OldFunc, ...)
+			end)
+			self.PreviousFunctions[Func] = OldFunc
+		else
+			local OldFunc; OldFunc = self:HookFunction(Func, function(...)
+				return Wrapped(OldFunc, ...)
+			end)
+			self.PreviousFunctions[Func] = OldFunc
+		end
 	end
 end
 
@@ -458,6 +476,9 @@ function Hook:ConnectClientRecive(Remote)
 	if not IsRemoteFunction then
    		Remote[Method]:Connect(Callback)
 	else -- Remote functions
+		--// [ANTI-DETECT] Детур OnClientInvoke требует hookfunction на
+		--// игровой колбэк — детектится. В стелс-режиме пропускаем.
+		if Configuration.StealthReceive then return end
 		self:HookClientInvoke(Remote, Method, Callback)
 	end
 end

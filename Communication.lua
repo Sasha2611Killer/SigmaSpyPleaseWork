@@ -242,8 +242,9 @@ function Module:QueueLog(Data)
                 end)
 
                 if not Ok then
-                    warn("SigmaSpy QueueLog:", Err)
-                end
+		-- не warn: строка ошибки может содержать имена функций из списка АС
+		self:ConsolePrint("QueueLog error:", tostring(Err):sub(1, 120))
+	end
 
                 Count += 1
                 if Count % 25 == 0 then

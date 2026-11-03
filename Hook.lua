@@ -327,19 +327,28 @@ function Hook:HookRemoteIndexes()
 end
 
 function Hook:BeginHooks()
-	--// [ANTI-DETECT] Функциональные хуки (hookfunction на FireServer/
-	--// InvokeServer) УБРАНЫ: на Delta они не ловят namecall-вызовы
-	--// (PROBE v5), но МЕНЯЮТ адрес функции — античиты ловят подмену
-	--// (tostring(Remote.InvokeServer) ≠ оригинал → кик). Метахук
-	--// __namecall перехватывает всё и невидим (метатаблица locked).
-	--// self:HookRemoteIndexes()
+	--// [ANTI-DETECT 2026-11-03] oth-бэкенд: метахук через oth.hook.
+	-- Хук исполняется на ОТДЕЛЬНОМ треде — детект "function hooks
+	-- detected" его не видит (пасsthrough-тест в игре прошёл).
+	-- Фолбэк: ReplaceMetaMethod (прямая запись __namecall).
+	local UseOth = typeof(oth) == "table" and typeof(oth.hook) == "function"
+		and Configuration.UseOthHooks ~= false
 
-	--// Namecall hook
 	local OriginalNameCall
-	OriginalNameCall = self:HookMetaMethod(game, "__namecall", function(self, ...)
-		local Method = getnamecallmethod()
-		return ProcessRemote(OriginalNameCall, "__namecall", self, Method, ...)
-	end)
+
+	if UseOth then
+		local OthOriginal
+		OthOriginal = oth.hook(getrawmetatable(game).__namecall, function(self, ...)
+			local Method = getnamecallmethod()
+			return ProcessRemote(OthOriginal, "__namecall", self, Method, ...)
+		end)
+		OriginalNameCall = OthOriginal
+	else
+		OriginalNameCall = self:HookMetaMethod(game, "__namecall", function(self, ...)
+			local Method = getnamecallmethod()
+			return ProcessRemote(OriginalNameCall, "__namecall", self, Method, ...)
+		end)
+	end
 
 	Merge(self, {
 		OriginalNamecall = OriginalNameCall,

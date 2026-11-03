@@ -37,6 +37,10 @@ local Module = {
             Value = true,
             Label = "Ignore nil parents",
         },
+        IgnoreDuplicates = {
+            Value = false,
+            Label = "Ignore duplicates (spam)"
+        },
         LogExploit = {
             Value = true,
             Label = "Log exploit calls",

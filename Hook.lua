@@ -137,12 +137,11 @@ function Hook:PatchFunctions()
 	--// Check if this function is disabled in the configuration
 	if Configuration.NoFunctionPatching or Config.NoFunctionPatching then return end
 
-	--// [FIX 2026-11-03] КЛАССИКА + clonefunction-защита. oth УБРАН:
-	--// тест в игре — классический hookfunction(pcall) пасsthrough 5 мин
-	--// без кика; oth.hook(pcall) кикал (у игры рекурсионный пробник
-	--// глубины стека). CleanCError не возвращаем.
+	--// [FIX 2026-11-03] КЛАССИКА. clonefunction(clonefunction) УБРАН —
+	--// недопустим и спамил ошибку в консоль (строка с "clonefunction"
+	--// в логе = риск по списку Adonis). Защищённая копия — только
+	--// hookfunction; цели клонируем обычным clonefunction.
 	local _hookfunction = clonefunction(hookfunction)
-	local _clonefunction = clonefunction(clonefunction)
 
 	local Patches = {
 		[pcall] = function(OldFunc, Func, ...)
@@ -186,7 +185,7 @@ function Hook:PatchFunctions()
 
 	--// Hook each function
 	for Func, CallBack in Patches do
-		local Original = _clonefunction(Func)
+		local Original = clonefunction(Func)
 		local Wrapped = newcclosure(CallBack)
 
 		_hookfunction(Func, function(...)

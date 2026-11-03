@@ -367,18 +367,39 @@ function Hook:BypassAdonis()
 end				
 
 function Hook:BeginHooks()
-	--// [2026-11-03] ПРЯМАЯ ЗАПИСЬ __namecall (ReplaceMetaMethod):
-	--// обработчик исполняется НА ИГРОВОМ ТРЕДЕ — обход стека
-	--// (FindCallingClosures) видит реальные фреймы игры: SourceScript =
-	--// модуль вызова (ClientCore), CallerScript = загрузчик (Framework).
-	--// oth отключён: с BypassAdonis детекты Adonis нейтрализованы, а oth
-	--// терял атрибуцию (обе кнопки Decompile показывали один скрипт).
+	--// Два режима, переключаются Configuration.UseOthHooks:
+	--// true  — oth (отдельный тред): детекторам не виден, но обход
+	--//         стека не видит игру → обе кнопки Decompile показывают
+	--//         один скрипт (fallback getcallingscript).
+	--// false — ПРЯМАЯ ЗАПИСЬ __namecall: обработчик на игровом треде,
+	--//         полная атрибуция (SourceScript/CallerScript различаются).
+	--//         Детекты Adonis нейтрализует BypassAdonis.
+	--// Оба режима распаковывают результат (Unpack) — без этого игра
+	--// получает таблицу вместо значений (зависание камеры).
+	local UseOth = typeof(oth) == "table" and typeof(oth.hook) == "function"
+		and Configuration.UseOthHooks ~= false
+
 	local OriginalNameCall
 
-	OriginalNameCall = self:ReplaceMetaMethod(game, "__namecall", function(self, ...)
-		local Method = getnamecallmethod()
-		return ProcessRemote(OriginalNameCall, "__namecall", self, Method, ...)
-	end)
+	if UseOth then
+		local OthOriginal
+		OthOriginal = oth.hook(getrawmetatable(game).__namecall, function(self, ...)
+			local Method = getnamecallmethod()
+
+			local Ok, ReturnValues = pcall(ProcessRemote, OthOriginal, "__namecall", self, Method, ...)
+			if Ok and ReturnValues then
+				return Process:Unpack(ReturnValues)
+			end
+
+			return OthOriginal(self, ...)
+		end)
+		OriginalNameCall = OthOriginal
+	else
+		OriginalNameCall = self:ReplaceMetaMethod(game, "__namecall", function(self, ...)
+			local Method = getnamecallmethod()
+			return ProcessRemote(OriginalNameCall, "__namecall", self, Method, ...)
+		end)
+	end
 
 	Merge(self, {
 		OriginalNamecall = OriginalNameCall,

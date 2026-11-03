@@ -135,7 +135,7 @@ end
 
 function Hook:PatchFunctions()
 	--// Check if this function is disabled in the configuration
-	if Configuration.NoFunctionPatching or Config.NoFunctionPatching then return end
+	if (Configuration and Configuration.NoFunctionPatching) or (Config and Config.NoFunctionPatching) then return end
 
 	--// [FIX 2026-11-03] КЛАССИКА. clonefunction(clonefunction) УБРАН —
 	--// недопустим и спамил ошибку в консоль (строка с "clonefunction"
@@ -377,7 +377,7 @@ function Hook:BeginHooks()
 	--// Оба режима распаковывают результат (Unpack) — без этого игра
 	--// получает таблицу вместо значений (зависание камеры).
 	local UseOth = typeof(oth) == "table" and typeof(oth.hook) == "function"
-		and Configuration.UseOthHooks ~= false
+		and (not Configuration or Configuration.UseOthHooks ~= false)
 
 	local OriginalNameCall
 
@@ -510,7 +510,7 @@ function Hook:ConnectClientRecive(Remote)
 	else -- Remote functions
 		--// [ANTI-DETECT] Детур OnClientInvoke требует hookfunction на
 		--// игровой колбэк — детектится. В стелс-режиме пропускаем.
-		if Configuration.StealthReceive then return end
+		if Configuration and Configuration.StealthReceive then return end
 		self:HookClientInvoke(Remote, Method, Callback)
 	end
 end
@@ -585,7 +585,7 @@ end
 
 function Hook:LoadMetaHooks(ActorCode: string, ChannelId: number)
 	--// Hook actors
-	if not Configuration.NoActors then
+	if not Configuration or not Configuration.NoActors then
 		self:RunOnActors(ActorCode, ChannelId)
 	end
 

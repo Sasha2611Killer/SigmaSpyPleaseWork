@@ -1470,6 +1470,9 @@ function Ui:ClearLogs()
 	RemotesCount = 0
 	RemotesList:ClearChildElements()
 
+	--// Ранний дедуп-счётчик тоже сбрасываем
+	self.DedupStore = nil
+
 	--// Clear logs from memory
 	table.clear(Logs)
 end
@@ -1480,6 +1483,32 @@ function Ui:QueueLog(Data)
 	--// attempt to index nil with 'Parent' в CreateLog лечится здесь.
 	if typeof(Data.Remote) ~= "Instance" then
 		return
+	end
+
+	--// [OPT] Ранний дедуп (IgnoreDuplicates): сравниваем СЫРЫЕ
+	--// сериализованные аргументы до десериализации/DeepClone/UI.
+	--// Спамные вызовы умирают сразу на входе. Ключ — Id ремоута,
+	--// хранение по методам (пинг-понг send/receive не пропускает).
+	local IgnoreDuplicates = Flags:GetFlagValue("IgnoreDuplicates")
+	if IgnoreDuplicates then
+		local Store = self.DedupStore
+		if not Store then
+			Store = {}
+			self.DedupStore = Store
+		end
+
+		local Id = Data.Id
+		local Method = Data.Method
+		local ById = Store[Id]
+		if not ById then
+			ById = {}
+			Store[Id] = ById
+		end
+
+		if Process:DeepEquals(Data.Args, ById[Method]) then
+			return
+		end
+		ById[Method] = Data.Args
 	end
 
 	local LogQueue = self.LogQueue
@@ -1516,7 +1545,7 @@ end
 
 function Ui:FilterName(Name: string, CharacterLimit: number?): string
 	local Trimmed = Name:sub(1, CharacterLimit or 20)
-	local Filtred = Trimmed:gsub("[\n\r]", "")
+	local Filtred = Trimmed:gsub("[\n\r]", " ")
 	Filtred = Generation:MakePrintable(Filtred)
 
 	return Filtred
@@ -1589,7 +1618,7 @@ function Ui:CreateLog(Data: Log)
 	--// Fetch HeaderData by the RemoteID used for stacking
 	local Header = self:GetRemoteHeader(Data)
 
-		--// IgnoreDuplicates (Detect Spam): вызовы с теми же Method и
+	--// IgnoreDuplicates (Detect Spam): вызовы с теми же Method и
 	--// аргументами не логируются повторно. Храним последние аргументы
 	--// ПО КАЖДОМУ Method отдельно: игры часто пинг-понгят send/receive
 	--// (GetPing → OnClientPing) — сравнение с предыдущим вызовом их

@@ -9,6 +9,7 @@ return {
 
     --// Processing
     ForceKonstantDecompiler = false,
+    Debug = true,
 
     --// Editor
     VariableNames = {

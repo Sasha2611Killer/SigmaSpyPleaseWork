@@ -327,8 +327,12 @@ function Hook:HookRemoteIndexes()
 end
 
 function Hook:BeginHooks()
-	--// Hook Remote functions
-	self:HookRemoteIndexes()
+	--// [ANTI-DETECT] Функциональные хуки (hookfunction на FireServer/
+	--// InvokeServer) УБРАНЫ: на Delta они не ловят namecall-вызовы
+	--// (PROBE v5), но МЕНЯЮТ адрес функции — античиты ловят подмену
+	--// (tostring(Remote.InvokeServer) ≠ оригинал → кик). Метахук
+	--// __namecall перехватывает всё и невидим (метатаблица locked).
+	--// self:HookRemoteIndexes()
 
 	--// Namecall hook
 	local OriginalNameCall
@@ -339,10 +343,9 @@ function Hook:BeginHooks()
 
 	Merge(self, {
 		OriginalNamecall = OriginalNameCall,
-		--OriginalIndex = Oi
 	})
 end
-
+				
 function Hook:HookClientInvoke(Remote, Method, Callback)
 	local Success, Function = pcall(function()
 		return getcallbackvalue(Remote, Method)

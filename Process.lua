@@ -220,6 +220,25 @@ function Process:DeepCloneTable(Table, Ignore: table?, Visited: table?): table
     return New
 end
 
+--// Глубокое сравнение для дедупликации логов (Detect Spam).
+--// Таблицы сравниваем рекурсивно, остальное — по ==.
+function Process:DeepEquals(A, B): boolean
+    if A == B then return true end
+    if typeof(A) ~= typeof(B) then return false end
+
+    if typeof(A) == "table" then
+        for Key, Value in next, A do
+            if not self:DeepEquals(Value, B[Key]) then return false end
+        end
+        for Key in next, B do
+            if A[Key] == nil then return false end
+        end
+        return true
+    end
+
+    return false
+end
+
 function Process:Unpack(Table: table)
     if not Table then return Table end
 	local Length = table.maxn(Table)
@@ -356,8 +375,7 @@ end
 --// но это НЕ конец стека — идём, пока debug.info(Level,"f") не nil.
 --// C-фреймы в Result не добавляем, но их env.script (владелец потока/
 --// загрузчик) собираем в Hints. identity 8 поднимается ЛЕНИВО — только
---// если getfenv упал (обычно не падает — нет лишних переключений на
---// каждый вызов ремоута). Страховка на executor'ы без identity-функций.
+--// если getfenv упал. Страховка на executor'ы без identity-функций.
 function Process:FindCallingClosures(_Offset: number?): (table, table)
     local Getfenv = Hook:GetOriginalFunc(getfenv)
     local Result = {}

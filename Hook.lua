@@ -322,10 +322,11 @@ function Hook:HookRemoteIndexes()
 end
 
 function Hook:BeginHooks()
-	--// [ANTI-DETECT 2026-11-03] oth-бэкенд: метахук через oth.hook.
-	-- Хук исполняется на ОТДЕЛЬНОМ треде — детект "function hooks
-	-- detected" его не видит (пасsthrough-тест в игре прошёл).
-	-- Фолбэк: ReplaceMetaMethod (прямая запись __namecall).
+	--// [ANTI-DETECT] oth-бэкенд: метахук через oth.hook (отдельный тред).
+	--// [FIX] Результат ProcessRemote — таблица: обязательно Unpack,
+	--// иначе игровой вызов получает таблицу вместо значений (камера
+	--// зависала, кик через 1-2 сек). pcall: наша ошибка не ломает
+	--// игровой вызов — чистый пасsthrough на оригинал.
 	local UseOth = typeof(oth) == "table" and typeof(oth.hook) == "function"
 		and Configuration.UseOthHooks ~= false
 
@@ -338,19 +339,23 @@ function Hook:BeginHooks()
 
 			local Ok, ReturnValues = pcall(ProcessRemote, OthOriginal, "__namecall", self, Method, ...)
 			if Ok and ReturnValues then
-				return Process:Unpack(ReturnValues)   -- ← РАСПАКОВКА
+				return Process:Unpack(ReturnValues)
 			end
 
-			return OthOriginal(self, ...)           -- ← пасsthrough при ошибке
+			return OthOriginal(self, ...)
 		end)
 		OriginalNameCall = OthOriginal
 	else
+		OriginalNameCall = self:HookMetaMethod(game, "__namecall", function(self, ...)
+			local Method = getnamecallmethod()
+			return ProcessRemote(OriginalNameCall, "__namecall", self, Method, ...)
+		end)
+	end
 
 	Merge(self, {
 		OriginalNamecall = OriginalNameCall,
 	})
 end
-
 --// Скрытие функции из стека (Cobalt делает так для детуров).
 --// Executor без setstackhidden — просто пропускаем (pcall).
 local function HideFromStack(Function)

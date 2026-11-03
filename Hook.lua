@@ -367,35 +367,18 @@ function Hook:BypassAdonis()
 end				
 
 function Hook:BeginHooks()
-	--// [ANTI-DETECT] oth-бэкенд: метахук через oth.hook (отдельный тред).
-	--// [FIX] Результат ProcessRemote — таблица: обязательно Unpack,
-	--// иначе игровой вызов получает таблицу вместо значений (камера
-	--// зависала, кик через 1-2 сек). pcall: наша ошибка не ломает
-	--// игровой вызов — чистый пасsthrough на оригинал.
-	local UseOth = typeof(oth) == "table" and typeof(oth.hook) == "function"
-		and Configuration.UseOthHooks ~= false
-
+	--// [2026-11-03] ПРЯМАЯ ЗАПИСЬ __namecall (ReplaceMetaMethod):
+	--// обработчик исполняется НА ИГРОВОМ ТРЕДЕ — обход стека
+	--// (FindCallingClosures) видит реальные фреймы игры: SourceScript =
+	--// модуль вызова (ClientCore), CallerScript = загрузчик (Framework).
+	--// oth отключён: с BypassAdonis детекты Adonis нейтрализованы, а oth
+	--// терял атрибуцию (обе кнопки Decompile показывали один скрипт).
 	local OriginalNameCall
 
-	if UseOth then
-		local OthOriginal
-		OthOriginal = oth.hook(getrawmetatable(game).__namecall, function(self, ...)
-			local Method = getnamecallmethod()
-
-			local Ok, ReturnValues = pcall(ProcessRemote, OthOriginal, "__namecall", self, Method, ...)
-			if Ok and ReturnValues then
-				return Process:Unpack(ReturnValues)
-			end
-
-			return OthOriginal(self, ...)
-		end)
-		OriginalNameCall = OthOriginal
-	else
-		OriginalNameCall = self:HookMetaMethod(game, "__namecall", function(self, ...)
-			local Method = getnamecallmethod()
-			return ProcessRemote(OriginalNameCall, "__namecall", self, Method, ...)
-		end)
-	end
+	OriginalNameCall = self:ReplaceMetaMethod(game, "__namecall", function(self, ...)
+		local Method = getnamecallmethod()
+		return ProcessRemote(OriginalNameCall, "__namecall", self, Method, ...)
+	end)
 
 	Merge(self, {
 		OriginalNamecall = OriginalNameCall,

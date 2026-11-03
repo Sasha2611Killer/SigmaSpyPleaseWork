@@ -133,36 +133,27 @@ function Hook:HookMetaMethod(Object: Instance, Call: string, Callback: MetaFunc)
 	return self:HookMetaCall(Object, Call, Func)
 end
 
---// This includes a few patches for executor functions that result in detection
---// This isn't bulletproof since some functions like hookfunction I can't patch
---// By the way, thanks for copying this guys! Super appreciate the copycat
 function Hook:PatchFunctions()
 	--// Check if this function is disabled in the configuration
 	if Configuration.NoFunctionPatching or Config.NoFunctionPatching then return end
 
-	--// [ANTI-DETECT] oth-патчи: pcall через oth.hook (отдельный тред) —
-	--// невидим для function-hooks-детектов (тест 2026-11-03: pcall жив,
-	--// кика нет). getfenv-патч под oth НЕ работает (завязан на
-	-- checkcaller() и глубину стека хук-трамплина) — только классический путь.
+	--// [FIX 2026-11-03] CleanCError УБРАН: он переписывал текст КАЖДОЙ
+	--// ошибки в игре ("invalid argument"→"missing argument", вырезал
+	--// ":NN:" и ", got X") — игры-пробники ловят расхождение строк.
+	--// Оставлен только stack-overflow патч (редкий, не трогает
+	--// обычные ошибки). oth-путь сохранён.
 	local UseOth = typeof(oth) == "table" and typeof(oth.hook) == "function"
 		and Configuration.UseOthHooks ~= false
 
 	local Patches = {
-		--// Error detection patch
-		--// hookfunction may still be detected depending on the executor
-		[pcall] =  function(OldFunc, Func, ...)
+		[pcall] = function(OldFunc, Func, ...)
 			local Responce = {OldFunc(Func, ...)}
 			local Success, Error = Responce[1], Responce[2]
-			local IsC = iscclosure(Func)
 
-			--// Patch c-closure error detection
-			if Success == false and IsC then
-				local NewError = Process:CleanCError(Error)
-				Responce[2] = NewError
-			end
-
-			--// Stack-overflow detection patch
-			if Success == false and not IsC and Error:find("C stack overflow") then
+			--// Только C stack overflow: обычные ошибки НЕ трогаем
+			if Success == false and type(Error) == "string"
+				and not iscclosure(Func) and Error:find("C stack overflow")
+			then
 				local Tracetable = Error:split(":")
 				local Caller, Line = Tracetable[1], Tracetable[2]
 				local Count = Process:CountMatches(Error, Caller)
@@ -178,7 +169,6 @@ function Hook:PatchFunctions()
 		[getfenv] = function(OldFunc, Level: number, ...)
 			Level = Level or 1
 
-			--// Prevent catpure of executor's env
 			if type(Level) == "number" then
 				Level += 2
 			end
@@ -186,7 +176,6 @@ function Hook:PatchFunctions()
 			local Responce = {OldFunc(Level, ...)}
 			local ENV = Responce[1]
 
-			--// __tostring ENV detection patch
 			if not checkcaller() and ENV == ExeENV then
 				Communication:ConsolePrint("ENV escape patched")
 				return OldFunc(999999, ...)
@@ -196,10 +185,9 @@ function Hook:PatchFunctions()
 		end
 	}
 
-	--// Hook each function
 	for Func, CallBack in Patches do
 		if Func == getfenv and UseOth then
-			continue --// getfenv-патч под oth некорректен (см. выше)
+			continue
 		end
 
 		local Wrapped = newcclosure(CallBack)
@@ -218,6 +206,7 @@ function Hook:PatchFunctions()
 		end
 	end
 end
+
 
 function Hook:GetOriginalFunc(Func)
 	return self.PreviousFunctions[Func] or Func

@@ -127,14 +127,6 @@ function Process:Init(Data)
     Hook = Modules.Hook
     Communication = Modules.Communication
     ReturnSpoofs = Modules.ReturnSpoofs
-
-    local OldInstancenew; OldInstancenew = hookfunction(getrenv().Instance.new, newcclosure(function(...)
-        local Inst = OldInstancenew(...)
-        if typeof(Inst) == "Instance" and Process.RemoteClassData[Inst.ClassName] then
-            InstanceCreatedRemotes[Inst :: Event] = true
-        end
-        return Inst
-    end))
 end
 
 --// Communication

@@ -1589,16 +1589,23 @@ function Ui:CreateLog(Data: Log)
 	--// Fetch HeaderData by the RemoteID used for stacking
 	local Header = self:GetRemoteHeader(Data)
 
-	--// IgnoreDuplicates (Detect Spam): вызовы с теми же Method и
-	--// аргументами по тому же remote не логируются повторно.
-	--// Сам вызов в игру проходит — дедуплицируется только лог.
+		--// IgnoreDuplicates (Detect Spam): вызовы с теми же Method и
+	--// аргументами не логируются повторно. Храним последние аргументы
+	--// ПО КАЖДОМУ Method отдельно: игры часто пинг-понгят send/receive
+	--// (GetPing → OnClientPing) — сравнение с предыдущим вызовом их
+	--// пропускало, т.к. Method чередуется.
 	local IgnoreDuplicates = Flags:GetFlagValue("IgnoreDuplicates")
 	if IgnoreDuplicates then
-		if Header.LastMethod == Method and Process:DeepEquals(ClonedArgs, Header.LastArgs) then
+		local LastByMethod = Header.LastByMethod
+		if not LastByMethod then
+			LastByMethod = {}
+			Header.LastByMethod = LastByMethod
+		end
+
+		if Process:DeepEquals(ClonedArgs, LastByMethod[Method]) then
 			return
 		end
-		Header.LastMethod = Method
-		Header.LastArgs = ClonedArgs
+		LastByMethod[Method] = ClonedArgs
 	end
 
 	local RemotesList = self.RemotesList

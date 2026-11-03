@@ -321,6 +321,51 @@ function Hook:HookRemoteIndexes()
 	end
 end
 
+function Hook:BypassAdonis()
+	if typeof(getgc) ~= "function" then return end
+
+	task.spawn(function()
+		local Detected, Kill
+		local Deadline = os.clock() + 10
+
+		repeat
+			for _, v in getgc(true) do
+				if typeof(v) == "table" then
+					local DetectFunc = rawget(v, "Detected")
+					local KillFunc = rawget(v, "Kill")
+
+					if typeof(DetectFunc) == "function" and not Detected then
+						Detected = DetectFunc
+						hookfunction(Detected, function()
+							return true
+						end)
+					end
+
+					if rawget(v, "Variables") and rawget(v, "Process")
+						and typeof(KillFunc) == "function" and not Kill
+					then
+						Kill = KillFunc
+						hookfunction(Kill, function() end)
+					end
+				end
+			end
+
+			if Detected then break end
+			task.wait(0.5)
+		until Detected or os.clock() > Deadline
+
+		if not Detected then return end
+
+		local Old; Old = hookfunction(getrenv().debug.info, newcclosure(function(...)
+			local LevelOrFunc = ...
+			if LevelOrFunc == Detected then
+				return coroutine.yield(coroutine.running())
+			end
+			return Old(...)
+		end))
+	end)
+end				
+
 function Hook:BeginHooks()
 	--// [ANTI-DETECT] oth-бэкенд: метахук через oth.hook (отдельный тред).
 	--// [FIX] Результат ProcessRemote — таблица: обязательно Unpack,
@@ -566,6 +611,7 @@ function Hook:LoadReceiveHooks()
 end
 
 function Hook:LoadHooks(ActorCode: string, ChannelId: number)
+	self:BypassAdonis()
 	self:LoadMetaHooks(ActorCode, ChannelId)
 	self:LoadReceiveHooks()
 end

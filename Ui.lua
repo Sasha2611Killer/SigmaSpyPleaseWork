@@ -1134,7 +1134,8 @@ function Ui:SetFocusedRemote(Data)
 			end)
 		end)
 	end, function(Err)
-		warn("SigmaSpy RemoteOptions:", tostring(Err):sub(1, 200))
+		-- не warn: консоль игры сканируется АС, шум не нужен
+		self:ConsoleLog("RemoteOptions:", tostring(Err):sub(1, 160))
 	end)
 
 	--// Instance options

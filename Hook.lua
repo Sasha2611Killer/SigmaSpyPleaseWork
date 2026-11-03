@@ -335,15 +335,16 @@ function Hook:BeginHooks()
 		local OthOriginal
 		OthOriginal = oth.hook(getrawmetatable(game).__namecall, function(self, ...)
 			local Method = getnamecallmethod()
-			return ProcessRemote(OthOriginal, "__namecall", self, Method, ...)
+
+			local Ok, ReturnValues = pcall(ProcessRemote, OthOriginal, "__namecall", self, Method, ...)
+			if Ok and ReturnValues then
+				return Process:Unpack(ReturnValues)   -- ← РАСПАКОВКА
+			end
+
+			return OthOriginal(self, ...)           -- ← пасsthrough при ошибке
 		end)
 		OriginalNameCall = OthOriginal
 	else
-		OriginalNameCall = self:HookMetaMethod(game, "__namecall", function(self, ...)
-			local Method = getnamecallmethod()
-			return ProcessRemote(OriginalNameCall, "__namecall", self, Method, ...)
-		end)
-	end
 
 	Merge(self, {
 		OriginalNamecall = OriginalNameCall,

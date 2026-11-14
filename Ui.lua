@@ -1283,28 +1283,25 @@ function Ui:ViewCallback(RemoteName: string, Callback: any)
 	return Window
 end
 
-function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
+function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptSignal)
 	if typeof(Signal) ~= "RBXScriptSignal" then
 		return self:ViewCallback(RemoteName, Signal)
 	end
 
 	local Window = self:CreateWindow({
 		Title = `Connections for: {RemoteName}`,
-		Size = UDim2.fromOffset(700, 300),   -- шире, т.к. колонок больше
+		Size = UDim2.fromOffset(1000, 300),
 	})
 
-	-- // Колонки таблицы
+	-- // Колонки: WrittenIn — синтетическая, её нельзя слать в FilterConnections
 	local ToDisplay = {
-		"Enabled",
-		"ForeignState",
-		"LuaConnection",
-		"Function",
-		"Thread",
-		"Script",
-		"WrittenIn",   -- NEW: путь из debug.info (строка)
+		"Enabled", "ForeignState", "LuaConnection", "Function", "Thread", "Script", "WrittenIn",
+	}
+	local Properties = {
+		"Enabled", "ForeignState", "LuaConnection", "Function", "Thread", "Script",
 	}
 
-	local Connections = Process:FilterConnections(Signal, ToDisplay)
+	local Connections = Process:FilterConnections(Signal, Properties)
 
 	local Table = Window:Table({
 		Border = true,
@@ -1312,11 +1309,25 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 		MaxColumns = 7,
 	})
 
-	-- // Безопасный вызов decompile
+	-- // Короткий текст для ячейки; в буфер идёт полное значение
+	local function HexTail(Value, Prefix)
+		local Hex = tostring(Value):match("0x(%x+)")
+		return Hex and (Prefix .. "…" .. Hex:sub(-4)) or "?"
+	end
+
+	local Display = {
+		Function     = function(v) return HexTail(v, "fn ") end,     -- fn …e5ba
+		Thread       = function(v) return HexTail(v, "th ") end,     -- th …17e8
+		Script       = function(v) return typeof(v) == "Instance" and v.Name or "?" end,
+		WrittenIn    = function(v)                                   -- MatchController:31
+			local Path, Line = tostring(v):match("^(.-):(%d+)")
+			if not Path then return tostring(v) end
+			return (Path:match("([^%.]+)$") or Path) .. ":" .. Line
+		end,
+	}
+
 	local function SafeDecompile(Value)
-		if typeof(Value) ~= "Instance" then
-			return   -- нечего декомпилировать (nil / строка)
-		end
+		if typeof(Value) ~= "Instance" then return end
 		local Task = self:FilterName(`Viewing: {Value.Name}.lua`, 200)
 		local Editor = self:MakeEditorPopoutWindow(nil, { Title = Task })
 		self:Decompile(Editor, Value)
@@ -1327,22 +1338,17 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 		Row:Button({
 			Text = "Copy",
 			Callback = function()
-				local Text = tostring(Value)
-				local Ok = pcall(function() setclipboard(Text) end)
-				if not Ok then warn(`setclipboard недоступен, значение: {Text}`) end
+				self:SetClipboard(tostring(Value))
 			end,
 		})
 	end
 
 	local ButtonsForValues = {
 		["Script"] = function(Row, Value)
-			-- кнопку показываем ТОЛЬКО если это Instance
 			if typeof(Value) ~= "Instance" then return end
 			Row:Button({
 				Text = "Decompile",
-				Callback = function()
-					SafeDecompile(Value)
-				end,
+				Callback = function() SafeDecompile(Value) end,
 			})
 			CopyButton(Row, Value:GetFullName())
 		end,
@@ -1353,49 +1359,35 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 				Callback = function(self)
 					Enabled = not Enabled
 					self.Text = Enabled and "Disable" or "Enable"
-					if Enabled then
-						Connection:Enable()
-					else
-						Connection:Disable()
-					end
+					if Enabled then Connection:Enable() else Connection:Disable() end
 				end,
 			})
 		end,
-		["Thread"]    = function(Row, Value) CopyButton(Row, Value) end,  -- "thread: 0x..."
-		["Function"]  = function(Row, Value) CopyButton(Row, Value) end,  -- "function: 0x..."
-		["WrittenIn"] = function(Row, Value) CopyButton(Row, Value) end,  -- "src:line (name)"
+
+		["Thread"]    = function(Row, Value) CopyButton(Row, Value) end,
+		["Function"]  = function(Row, Value) CopyButton(Row, Value) end,
+		["WrittenIn"] = function(Row, Value) CopyButton(Row, Value) end,
 	}
 
-	-- // Скрипт-источник соединения: 4 захода
+	-- // Скрипт-источник соединения: 3 захода
 	local function GetConnectionScript(Connection)
-		-- 1) поле .Script от executor'а
 		if typeof(Connection.Script) == "Instance" then
 			return Connection.Script
 		end
-
-		-- 2) скрипт потока (работает для C-closures / loadstring)
 		if Connection.Thread and typeof(getscriptfromthread) == "function" then
 			local Ok, Script = pcall(getscriptfromthread, Connection.Thread)
-			if Ok and typeof(Script) == "Instance" then
-				return Script
-			end
+			if Ok and typeof(Script) == "Instance" then return Script end
 		end
-
-		-- 3) env функции
 		local Fn = Connection.Function
 		if typeof(Fn) == "function" then
 			local Ok, FromEnv = pcall(function()
 				return Process:GetScriptFromFunc(Fn)
 			end)
-			if Ok and typeof(FromEnv) == "Instance" then
-				return FromEnv
-			end
+			if Ok and typeof(FromEnv) == "Instance" then return FromEnv end
 		end
-
 		return nil
 	end
 
-	-- // Путь из debug.info (строка) — отдельная колонка
 	local function GetWrittenIn(Connection)
 		local Fn = Connection.Function
 		if typeof(Fn) ~= "function" then
@@ -1407,7 +1399,6 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 		return `{Src}:{Line} ({NameStr})`
 	end
 
-	-- // Заголовки
 	self:MakeTableHeaders(Table, ToDisplay)
 
 	for _, Connection in Connections do
@@ -1426,12 +1417,10 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 				Value = Connection[Property]
 			end
 
+			local Shown = Display[Property] and Display[Property](Value) or tostring(Value)
+			ColumnRow:Label({ Text = Shown })
+
 			local Callback = ButtonsForValues[Property]
-
-			-- // Label (безопасный tostring)
-			ColumnRow:Label({ Text = tostring(Value) })
-
-			-- // Кнопки
 			if Callback then
 				Callback(ColumnRow, Value, Connection)
 			end

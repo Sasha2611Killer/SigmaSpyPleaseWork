@@ -1284,74 +1284,80 @@ function Ui:ViewCallback(RemoteName: string, Callback: any)
 end
 
 function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
-	--// Для RemoteFunction (OnClientInvoke/OnInvoke) Signal — это
-	--// callback-значение, а не RBXScriptSignal: getconnections на нём
-	--// упал бы. Показываем окно самого колбэка.
 	if typeof(Signal) ~= "RBXScriptSignal" then
 		return self:ViewCallback(RemoteName, Signal)
 	end
 
 	local Window = self:CreateWindow({
 		Title = `Connections for: {RemoteName}`,
-		Size = UDim2.fromOffset(450, 250)
+		Size = UDim2.fromOffset(700, 300),   -- шире, т.к. колонок больше
 	})
 
+	-- // Колонки таблицы
 	local ToDisplay = {
 		"Enabled",
+		"ForeignState",
 		"LuaConnection",
-		"Script"
+		"Function",
+		"Thread",
+		"Script",
+		"WrittenIn",   -- NEW: путь из debug.info (строка)
 	}
 
-	--// Get Filtered connections
 	local Connections = Process:FilterConnections(Signal, ToDisplay)
 
-	--// Table
 	local Table = Window:Table({
 		Border = true,
 		RowBackground = true,
-		MaxColumns = 3
+		MaxColumns = 4,
 	})
+
+	-- // Безопасный вызов decompile
+	local function SafeDecompile(Value)
+		if typeof(Value) ~= "Instance" then
+			return   -- нечего декомпилировать (nil / строка)
+		end
+		local Task = self:FilterName(`Viewing: {Value.Name}.lua`, 200)
+		local Editor = self:MakeEditorPopoutWindow(nil, { Title = Task })
+		self:Decompile(Editor, Value)
+	end
 
 	local ButtonsForValues = {
 		["Script"] = function(Row, Value)
+			-- кнопку показываем ТОЛЬКО если это Instance
+			if typeof(Value) ~= "Instance" then return end
 			Row:Button({
 				Text = "Decompile",
 				Callback = function()
-					local Task = self:FilterName(`Viewing: {Value}.lua`, 200)
-					local Editor = self:MakeEditorPopoutWindow(nil, {
-						Title = Task
-					})
-					self:Decompile(Editor, Value)
-				end
+					SafeDecompile(Value)
+				end,
 			})
 		end,
+
 		["Enabled"] = function(Row, Enabled, Connection)
 			Row:Button({
 				Text = Enabled and "Disable" or "Enable",
 				Callback = function(self)
 					Enabled = not Enabled
 					self.Text = Enabled and "Disable" or "Enable"
-
-					--// Enable or disable the connection
 					if Enabled then
 						Connection:Enable()
 					else
 						Connection:Disable()
 					end
-				end
+				end,
 			})
-		end
+		end,
 	}
 
-	--// Скрипт-источник соединения: три захода (Cobalt-style):
-	--// 1) поле .Script от executor'а, 2) getscriptfromthread(Connection.Thread),
-	--// 3) env функции. getscriptfromthread определяет скрипт надёжнее env —
-	--// работает для C-closures и loadstring-обработчиков.
+	-- // Скрипт-источник соединения: 4 захода
 	local function GetConnectionScript(Connection)
+		-- 1) поле .Script от executor'а
 		if typeof(Connection.Script) == "Instance" then
 			return Connection.Script
 		end
 
+		-- 2) скрипт потока (работает для C-closures / loadstring)
 		if Connection.Thread and typeof(getscriptfromthread) == "function" then
 			local Ok, Script = pcall(getscriptfromthread, Connection.Thread)
 			if Ok and typeof(Script) == "Instance" then
@@ -1359,10 +1365,33 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 			end
 		end
 
-		return Process:GetScriptFromFunc(Connection.Function)
+		-- 3) env функции
+		local Fn = Connection.Function
+		if typeof(Fn) == "function" then
+			local Ok, FromEnv = pcall(function()
+				return Process:GetScriptFromFunc(Fn)
+			end)
+			if Ok and typeof(FromEnv) == "Instance" then
+				return FromEnv
+			end
+		end
+
+		return nil
 	end
 
-	--// Make headers on the table
+	-- // Путь из debug.info (строка) — отдельная колонка
+	local function GetWrittenIn(Connection)
+		local Fn = Connection.Function
+		if typeof(Fn) ~= "function" then
+			return typeof(Fn) == "nil" and "?" or `<{typeof(Fn)}>`
+		end
+		local Ok, Src, Line, Name = pcall(debug.info, Fn, "sln")
+		if not Ok or not Src then return "?" end
+		local NameStr = (type(Name) == "string" and Name ~= "") and Name or "<anonymous>"
+		return `{Src}:{Line} ({NameStr})`
+	end
+
+	-- // Заголовки
 	self:MakeTableHeaders(Table, ToDisplay)
 
 	for _, Connection in Connections do
@@ -1372,22 +1401,27 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 			local Column = Row:NextColumn()
 			local ColumnRow = Column:Row()
 
-			local Value = Property == "Script"
-				and GetConnectionScript(Connection)
-				or Connection[Property]
+			local Value
+			if Property == "Script" then
+				Value = GetConnectionScript(Connection)
+			elseif Property == "WrittenIn" then
+				Value = GetWrittenIn(Connection)
+			else
+				Value = Connection[Property]
+			end
+
 			local Callback = ButtonsForValues[Property]
 
-			--// Value label
-			ColumnRow:Label({Text=`{Value}`})
+			-- // Label (безопасный tostring)
+			ColumnRow:Label({ Text = tostring(Value) })
 
-			--// Add buttons
+			-- // Кнопки
 			if Callback then
 				Callback(ColumnRow, Value, Connection)
 			end
 		end
 	end
 
-	--// Center Window
 	Window:Center()
 end
 

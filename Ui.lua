@@ -1344,6 +1344,7 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 					SafeDecompile(Value)
 				end,
 			})
+			CopyButton(Row, Value:GetFullName())
 		end,
 
 		["Enabled"] = function(Row, Enabled, Connection)

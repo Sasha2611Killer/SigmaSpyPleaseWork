@@ -384,7 +384,7 @@ function Generation:RemoteScript(Module, Data: RemoteData, ScriptType: string): 
 	--// Make code (GetNil-код идёт первым, чтобы remote-переменная его видела)
 	local Code = self:GetBase(Module)
 	if GetNilCode then
-		Code = GetNilCode .. Code
+		Code = Code .. GetNilCode
 	end
 	return `{Code}\n{CallCode}`
 end

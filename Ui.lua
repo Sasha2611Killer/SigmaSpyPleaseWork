@@ -1309,7 +1309,7 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 	local Table = Window:Table({
 		Border = true,
 		RowBackground = true,
-		MaxColumns = 4,
+		MaxColumns = 7,
 	})
 
 	-- // Безопасный вызов decompile

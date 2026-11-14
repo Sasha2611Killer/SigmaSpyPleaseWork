@@ -1322,6 +1322,18 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 		self:Decompile(Editor, Value)
 	end
 
+	local function CopyButton(Row, Value)
+		if Value == nil then return end
+		Row:Button({
+			Text = "Copy",
+			Callback = function()
+				local Text = tostring(Value)
+				local Ok = pcall(function() setclipboard(Text) end)
+				if not Ok then warn(`setclipboard недоступен, значение: {Text}`) end
+			end,
+		})
+	end
+
 	local ButtonsForValues = {
 		["Script"] = function(Row, Value)
 			-- кнопку показываем ТОЛЬКО если это Instance
@@ -1348,6 +1360,9 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 				end,
 			})
 		end,
+		["Thread"]    = function(Row, Value) CopyButton(Row, Value) end,  -- "thread: 0x..."
+		["Function"]  = function(Row, Value) CopyButton(Row, Value) end,  -- "function: 0x..."
+		["WrittenIn"] = function(Row, Value) CopyButton(Row, Value) end,  -- "src:line (name)"
 	}
 
 	-- // Скрипт-источник соединения: 4 захода

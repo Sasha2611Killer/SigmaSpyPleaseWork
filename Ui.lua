@@ -1290,9 +1290,10 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 
 	local Window = self:CreateWindow({
 		Title = `Connections for: {RemoteName}`,
-		Size = UDim2.fromOffset(700, 300),
+		Size = UDim2.fromOffset(700, 300),   -- шире, т.к. колонок больше
 	})
 
+	-- // Колонки таблицы
 	local ToDisplay = {
 		"Enabled",
 		"ForeignState",
@@ -1300,7 +1301,7 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 		"Function",
 		"Thread",
 		"Script",
-		"WrittenIn",
+		"WrittenIn",   -- NEW: путь из debug.info (строка)
 	}
 
 	local Connections = Process:FilterConnections(Signal, ToDisplay)
@@ -1311,8 +1312,11 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 		MaxColumns = 4,
 	})
 
+	-- // Безопасный вызов decompile
 	local function SafeDecompile(Value)
-		if typeof(Value) ~= "Instance" then return end
+		if typeof(Value) ~= "Instance" then
+			return   -- нечего декомпилировать (nil / строка)
+		end
 		local Task = self:FilterName(`Viewing: {Value.Name}.lua`, 200)
 		local Editor = self:MakeEditorPopoutWindow(nil, { Title = Task })
 		self:Decompile(Editor, Value)
@@ -1320,6 +1324,7 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 
 	local ButtonsForValues = {
 		["Script"] = function(Row, Value)
+			-- кнопку показываем ТОЛЬКО если это Instance
 			if typeof(Value) ~= "Instance" then return end
 			Row:Button({
 				Text = "Decompile",
@@ -1345,11 +1350,14 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 		end,
 	}
 
+	-- // Скрипт-источник соединения: 4 захода
 	local function GetConnectionScript(Connection)
+		-- 1) поле .Script от executor'а
 		if typeof(Connection.Script) == "Instance" then
 			return Connection.Script
 		end
 
+		-- 2) скрипт потока (работает для C-closures / loadstring)
 		if Connection.Thread and typeof(getscriptfromthread) == "function" then
 			local Ok, Script = pcall(getscriptfromthread, Connection.Thread)
 			if Ok and typeof(Script) == "Instance" then
@@ -1357,6 +1365,7 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 			end
 		end
 
+		-- 3) env функции
 		local Fn = Connection.Function
 		if typeof(Fn) == "function" then
 			local Ok, FromEnv = pcall(function()
@@ -1370,6 +1379,7 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 		return nil
 	end
 
+	-- // Путь из debug.info (строка) — отдельная колонка
 	local function GetWrittenIn(Connection)
 		local Fn = Connection.Function
 		if typeof(Fn) ~= "function" then
@@ -1381,39 +1391,7 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 		return `{Src}:{Line} ({NameStr})`
 	end
 
-	-- // Вспомогательная функция для кликабельного текста (копирование)
-	local function MakeCopyableLabel(Row, Text)
-		local IsCopyable = (Text ~= "nil" and Text ~= "?" and not Text:match("^<"))
-		
-		local Label = Row:Label({ 
-			Text = tostring(Text),
-			-- Если в вашем UI-фреймворке поддерживается свойство TextColor, можно добавить:
-			-- TextColor = IsCopyable and Color3.fromRGB(150, 200, 255) or Color3.fromRGB(150, 150, 150)
-		})
-
-		if IsCopyable and Label then
-			-- Делаем кнопку невидимой поверх текста, чтобы отловить клик
-			-- (зависит от API вашего UI фреймворка, если Label не имеет .Clicked)
-			if Label.Button then
-				Label.Button.Transparency = 1
-				Label.Button.Text = ""
-				Label.Button.MouseButton1Click:Connect(function()
-					if typeof(setclipboard) == "function" then
-						setclipboard(tostring(Text))
-					end
-				end)
-			elseif Label.Clicked then
-				Label.Clicked:Connect(function()
-					if typeof(setclipboard) == "function" then
-						setclipboard(tostring(Text))
-					end
-				end)
-			end
-		end
-
-		return Label
-	end
-
+	-- // Заголовки
 	self:MakeTableHeaders(Table, ToDisplay)
 
 	for _, Connection in Connections do
@@ -1434,14 +1412,8 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 
 			local Callback = ButtonsForValues[Property]
 
-			-- // Выводим текст
-			if Property == "Thread" or Property == "Function" or Property == "WrittenIn" then
-				-- Используем кликабельный лейбл для этих колонок
-				MakeCopyableLabel(ColumnRow, tostring(Value))
-			else
-				-- Для остальных обычный лейбл (или тоже кликабельный, если хочешь)
-				ColumnRow:Label({ Text = tostring(Value) })
-			end
+			-- // Label (безопасный tostring)
+			ColumnRow:Label({ Text = tostring(Value) })
 
 			-- // Кнопки
 			if Callback then
@@ -1452,6 +1424,7 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 
 	Window:Center()
 end
+
 function Ui:GetRemoteHeader(Data: Log)
 	local LogLimit = self.LogLimit
 	local Logs = self.Logs

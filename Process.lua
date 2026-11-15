@@ -129,6 +129,87 @@ local LogQueue = {}
 local LogQueueTail = 0
 local LogWorkerStarted = false
 
+--// =====================================================================
+--// ДИАГНОСТИКА (включается из консоли executor'а, без правки файла)
+--// =====================================================================
+--// getgenv().SIGMA_NO_LOG = true
+--//   → логирование выключено полностью (только сам вызов ремоута).
+--//   Если задержка НЕ исчезла — виноват не лог-пайплайн.
+--
+--// getgenv().SIGMA_DEBUG = true
+--//   → печатает медленные вызовы (> 50 мс) с разбором времени.
+--
+--// getgenv().SIGMA_MAX_LOGS = 30
+--//   → жёсткий лимит захвата (0 = без ограничений).
+local Genv = (getgenv and getgenv()) or nil
+
+local DebugMode = false
+local NoLogMode = false
+local SlowCallThreshold = 50
+local MaxCapturePerSecond = 0
+
+local CaptureBudget = {}
+local CaptureBudgetCount = 0
+
+local function RefreshDiagnosticFlags()
+    if not Genv then return end
+
+    DebugMode = Genv.SIGMA_DEBUG == true
+    NoLogMode = Genv.SIGMA_NO_LOG == true
+
+    local Limit = tonumber(Genv.SIGMA_MAX_LOGS)
+    if Limit then
+        MaxCapturePerSecond = Limit
+    end
+end
+
+--// Бюджет захвата: ограничивает количество ТЯЖЁЛЫХ вызовов в секунду.
+--// 0 = без ограничений (по умолчанию).
+local function AllowCapture(Remote: Instance): boolean
+    if MaxCapturePerSecond <= 0 then return true end
+
+    local Now = os.clock()
+    local Entry = CaptureBudget[Remote]
+
+    if not Entry then
+        CaptureBudget[Remote] = { Count = 1, WindowStart = Now }
+        CaptureBudgetCount += 1
+        return true
+    end
+
+    if Now - Entry.WindowStart >= 1 then
+        Entry.WindowStart = Now
+        Entry.Count = 1
+        return true
+    end
+
+    Entry.Count += 1
+    return Entry.Count <= MaxCapturePerSecond
+end
+
+--// =====================================================================
+--// КЭШИ (Cobalt: DebugId/скрипты резолвятся ОДИН раз, а не на каждый вызов)
+--// =====================================================================
+--// Per-remote: DebugId + ClassData (за жизнь ремоута не меняются)
+local RemoteMetaCache = setmetatable({}, {__mode = "k"})
+
+--// Per-function: Function → Script (weak)
+local ScriptCache = setmetatable({}, {__mode = "k"})
+
+--// game:GetDescendants() — дорогой вызов (тысячи инстансов).
+--// Кэшируем на 5 секунд.
+local DescendantsCache: { any }? = nil
+local DescendantsCacheTime = 0
+
+local function GetDescendantsCached(): { any }
+    local Now = os.clock()
+    if not DescendantsCache or (Now - DescendantsCacheTime) > 5 then
+        DescendantsCache = game:GetDescendants()
+        DescendantsCacheTime = Now
+    end
+    return DescendantsCache
+end
+
 function Process:Merge(Base: table, New: table)
     if not New then return end
 	for Key, Value in next, New do
@@ -158,6 +239,7 @@ function Process:Init(Data)
 				task.wait()
 
 				local Ok, Error = pcall(function()
+					Process:RefreshDiagnostics()
 					Process:FlushLogQueue()
 				end)
 
@@ -193,6 +275,11 @@ function Process:FlushLogQueue()
 			Communication:QueueLog(Data)
 		end
 	end
+end
+
+--// Обновление диагностических флагов (раз в кадр, дёшево)
+function Process:RefreshDiagnostics()
+    RefreshDiagnosticFlags()
 end
 
 --// Communication
@@ -312,6 +399,13 @@ function Process:CloneArgs(...)
     end
 
     return Result
+end
+
+--// Публичный быстрый клон таблицы (для UI).
+--// В отличие от DeepCloneTable не зовёт Communication:WaitCheck()
+--// на каждое значение — тот вызов на спаме тормозил UI.
+function Process:CloneTableFast(Table: any): any
+    return self:CloneValueFast(Table)
 end
 
 --// Глубокое сравнение для дедупликации логов (Detect Spam).
@@ -646,6 +740,20 @@ end
 function Process:GetScriptFromFunc(Func: (...any) -> ...any)
     if not Func then return end
 
+    --// Кэш: скрипт функции не меняется. false = "не нашли".
+    local Cached = ScriptCache[Func]
+    if Cached ~= nil then
+        if Cached == false then return end
+        return Cached
+    end
+
+    local Result = self:ResolveScriptFromFunc(Func)
+    ScriptCache[Func] = Result or false
+
+    return Result
+end
+
+function Process:ResolveScriptFromFunc(Func: (...any) -> ...any)
     local Success, ENV = pcall(getfenv, Func)
     if Success then
         if not self:IsSigmaSpyENV(ENV) then
@@ -662,7 +770,8 @@ function Process:GetScriptFromFunc(Func: (...any) -> ...any)
     if SourceOk and type(Source) == "string" and Source ~= "[C]" and #Source > 0 then
         local TargetName = Source:match("[%w_]+$")
         if TargetName then
-            local Candidates = {game:GetDescendants()}
+            --// Кэш потомков (game:GetDescendants() — тысячи инстансов)
+            local Candidates = {GetDescendantsCached()}
             if typeof(getloadedmodules) == "function" then
                 table.insert(Candidates, getloadedmodules())
             end
@@ -829,15 +938,36 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
 
 	if TransferType and not self:RemoteAllowed(Remote, TransferType, Method) then return end
 
+    --// ------------------------------------------------------------------
+    --// ДИАГНОСТИЧЕСКИЙ РЕЖИМ: логирование выключено, только сам вызов.
+    --// Если задержка не исчезла — виноват НЕ лог-пайплайн.
+    --// ------------------------------------------------------------------
+    if NoLogMode then
+        return ProcessCallback(Data, Remote, ...)
+    end
+
+    local StartClock = os.clock()
+
+    --// Id + ClassData — кэшируем (не меняются за жизнь ремоута)
     local Id
-	do
-		local identity = getthreadidentity()
-		setthreadidentity(8)
-		local OkDid, Did = pcall(Remote.GetDebugId, Remote)
-		setthreadidentity(identity)
-		Id = (OkDid and Did) or tostring(Remote):sub(-12)
-	end
-    local ClassData = self:GetClassData(Remote)
+    local ClassData
+    do
+        local Cached = RemoteMetaCache[Remote]
+        if Cached then
+            Id = Cached.Id
+            ClassData = Cached.ClassData
+        else
+            local identity = getthreadidentity()
+            setthreadidentity(8)
+            local OkDid, Did = pcall(Remote.GetDebugId, Remote)
+            setthreadidentity(identity)
+            Id = (OkDid and Did) or tostring(Remote):sub(-12)
+            ClassData = self:GetClassData(Remote)
+
+            RemoteMetaCache[Remote] = { Id = Id, ClassData = ClassData }
+        end
+    end
+
     local Timestamp = tick()
 
     if IsReceive then
@@ -886,11 +1016,20 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
 
     --// 4) Логирование — в очередь. Разбор стека + сериализация + UI
     --//    выполняются в воркере (Process:FlushLogQueue), раз в кадр.
-    LogQueueTail += 1
-    LogQueue[LogQueueTail] = {
-        Data = Data,
-        Functions = CallingFunctions,
-    }
+    if AllowCapture(Remote) then
+        LogQueueTail += 1
+        LogQueue[LogQueueTail] = {
+            Data = Data,
+            Functions = CallingFunctions,
+        }
+    end
+
+    if DebugMode then
+        local Elapsed = (os.clock() - StartClock) * 1000
+        if Elapsed > SlowCallThreshold then
+            print(string.format("[Sigma] slow %s: %.1f ms", tostring(Method), Elapsed))
+        end
+    end
 
     return ReturnValues
 end

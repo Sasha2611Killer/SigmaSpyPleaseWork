@@ -46,7 +46,23 @@ local Ui = {
     Window = nil,
     RandomSeed = Random.new(tick()),
 	Logs = setmetatable({}, {__mode = "k"}),
-	LogQueue = setmetatable({}, {__mode = "v"}),
+
+	--// [FIX] Было {__mode = "v"}: слабые значения, и любой лог, на который
+	--// больше никто не ссылается, мог быть собран GC ещё ДО отрисовки
+	--// (то есть пропасть). Очередь должна держать логи сильно.
+	LogQueue = {},
+	LogQueueHead = 1,
+	LogQueueTail = 0,
+
+	--// Сколько логов от одного remote ждёт отрисовки. Спамер упирается
+	--// в этот лимит и не вытесняет логи остальных remote.
+	MaxPendingPerRemote = 32,
+
+	--// Бюджет отрисовки на кадр (см. ProcessLogQueue)
+	MaxLogsPerFrame = 32,
+
+	PendingByRemote = {},
+	DroppedByRemote = {},
 } 
 
 type table = {
@@ -1558,11 +1574,29 @@ function Ui:ClearLogs()
 	--// Ранний дедуп-счётчик тоже сбрасываем
 	self.DedupStore = nil
 
+	--// [FIX] Очередь отрисовки и лимиты тоже чистим, иначе после Clear
+	--// в очередь вываливались все накопленные спам-логи.
+	self.LogQueue = {}
+	self.LogQueueHead = 1
+	self.LogQueueTail = 0
+	self.PendingByRemote = {}
+	self.DroppedByRemote = {}
+
 	--// Clear logs from memory
 	table.clear(Logs)
 end
 
 function Ui:QueueLog(Data)
+	--// [FIX] Communication теперь шлёт БАТЧ (Cobalt-style), а не одиночный
+	--// лог. Раньше батч прилетал в Ui:QueueLog как один Data, guard ниже
+	--// видел Data.Remote == nil и молча выбрасывал ВСЁ. Принимаем оба вида.
+	if Data[1] ~= nil then
+		for Index = 1, #Data do
+			self:QueueLog(Data[Index])
+		end
+		return
+	end
+
 	--// Guard: логи из actor-VM могут приходить с Remote == nil
 	--// (инстанс не пережил пересечение границы Lua-state через канал).
 	--// attempt to index nil with 'Parent' в CreateLog лечится здесь.
@@ -1570,20 +1604,34 @@ function Ui:QueueLog(Data)
 		return
 	end
 
+	local Remote = Data.Remote
+	local Id = Data.Id
+	local Method = Data.Method
+
+	--// [OPT] Дешёвые фильтры ДО тяжёлых копий аргументов. Раньше Paused /
+	--// LogRecives / Excluded отсекались только в CreateLog — то есть после
+	--// десериализации и двух DeepClone на КАЖДЫЙ вызов спамера.
+	if Flags:GetFlagValue("Paused") then return end
+	if Data.IsReceive and not Flags:GetFlagValue("LogRecives") then return end
+	if Data.IsExploit and not Flags:GetFlagValue("LogExploit") then return end
+
+	if Flags:GetFlagValue("IgnoreNil") and Hook:Index(Remote, "Parent") == nil then
+		return
+	end
+
+	if Process:GetRemoteData(Id).Excluded then return end
+
 	--// [OPT] Ранний дедуп (IgnoreDuplicates): сравниваем СЫРЫЕ
 	--// сериализованные аргументы до десериализации/DeepClone/UI.
 	--// Спамные вызовы умирают сразу на входе. Ключ — Id ремоута,
 	--// хранение по методам (пинг-понг send/receive не пропускает).
-	local IgnoreDuplicates = Flags:GetFlagValue("IgnoreDuplicates")
-	if IgnoreDuplicates then
+	if Flags:GetFlagValue("IgnoreDuplicates") then
 		local Store = self.DedupStore
 		if not Store then
 			Store = {}
 			self.DedupStore = Store
 		end
 
-		local Id = Data.Id
-		local Method = Data.Method
 		local ById = Store[Id]
 		if not ById then
 			ById = {}
@@ -1596,27 +1644,70 @@ function Ui:QueueLog(Data)
 		ById[Method] = Data.Args
 	end
 
-	local LogQueue = self.LogQueue
-	Process:Merge(Data, {
-		Args = Process:DeepCloneTable(Data.Args),
-	})
+	--// [FIX] Per-remote лимит ожидающих. Флуд одного remote упирается
+	--// в собственный счётчик и НЕ вытесняет логи остальных remote.
+	--// Аналог cobalt'овского Log:IsOverSpamThreshold.
+	local Pending = self.PendingByRemote
+	local Count = Pending[Id] or 0
+	if Count >= self.MaxPendingPerRemote then
+		self.DroppedByRemote[Id] = (self.DroppedByRemote[Id] or 0) + 1
+		return
+	end
+	Pending[Id] = Count + 1
 
+	--// Args оставляем сериализованными: свежую таблицу всё равно создаёт
+	--// DeserializeTable в CreateLog. Лишний DeepClone на каждый лог убран.
 	if Data.ReturnValues then
-        Data.ReturnValues = Process:DeepCloneTable(Data.ReturnValues)
-    end
-	
-    table.insert(LogQueue, Data)
+		Data.ReturnValues = Process:DeepCloneTable(Data.ReturnValues)
+	end
+
+	local Tail = self.LogQueueTail + 1
+	self.LogQueueTail = Tail
+	self.LogQueue[Tail] = Data
 end
 
 function Ui:ProcessLogQueue()
 	local Queue = self.LogQueue
-    if #Queue <= 0 then return end
+	local Head = self.LogQueueHead or 1
+	local Tail = self.LogQueueTail or 0
+	if Head > Tail then return end
 
-	--// Create a log element for each in the Queue
-    for Index, Data in next, Queue do
-        self:CreateLog(Data)
-        table.remove(Queue, Index)
-    end
+	--// [FIX] Было: for Index, Data in next, Queue + table.remove(Queue, Index)
+	--// — O(n^2), и из-за сдвига индексов через next обрабатывалась только
+	--// половина очереди (логи терялись). Теперь head/tail FIFO.
+	--// Плюс бюджет на кадр: один спамер не может занять весь кадр.
+	local Budget = self.MaxLogsPerFrame
+	local Pending = self.PendingByRemote
+	local Processed = 0
+
+	while Head <= Tail and Processed < Budget do
+		local Data = Queue[Head]
+		Queue[Head] = nil
+
+		--// Сдвигаем указатель ДО отрисовки: CreateLog может уступать поток
+		--// (декомпиляция/запросы), а очередь в это время пополняется.
+		Head += 1
+		self.LogQueueHead = Head
+		Processed += 1
+
+		if Data then
+			local RemoteId = Data.Id or 0
+			local PendingCount = (Pending[RemoteId] or 1) - 1
+			Pending[RemoteId] = if PendingCount > 0 then PendingCount else nil
+
+			--// Один кривой лог не должен ронять обработку остальных
+			pcall(self.CreateLog, self, Data)
+		end
+	end
+
+	self.LogQueueHead = Head
+
+	--// Полностью опустели и новых вставок не было — обнуляем очередь
+	if self.LogQueueHead > self.LogQueueTail then
+		self.LogQueue = {}
+		self.LogQueueHead = 1
+		self.LogQueueTail = 0
+	end
 end
 
 function Ui:BeginLogService()
@@ -1676,11 +1767,10 @@ function Ui:CreateLog(Data: Log)
     --// Excluded check
     if RemoteData.Excluded then return end
 
-	--// Deserialize arguments
+	--// Deserialize arguments (DeserializeTable уже создаёт новые таблицы,
+	--// третий DeepClone на каждый вызов был лишним)
 	Args = Communication:DeserializeTable(Args)
-
-	--// Deep clone data
-	local ClonedArgs = Process:DeepCloneTable(Args)
+	local ClonedArgs = Args
 	Data.Args = ClonedArgs
 	Data.ValueSwaps = Generation:MakeValueSwapsTable(Timestamp)
 

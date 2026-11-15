@@ -107,6 +107,28 @@ local InstanceCreatedRemotes: typeof(setmetatable({} :: {[Event]: true}, {__mode
     __mode = "k"
 })
 
+--// =====================================================================
+--// Cobalt-style: ОЧЕРЕДЬ ЛОГОВ + ВОРКЕР (Src/Utils/Log.luau)
+--// =====================================================================
+--// Раньше на треде вызова ремоута делалось:
+--//   1) разбор стека (16 уровней × getfenv)      <- тяжело
+--//   2) копирование аргументов
+--//   3) РЕАЛЬНЫЙ ВЫЗОВ РЕМОУТА                     <- отправка ЗДЕСЬ
+--//   4) Communication:QueueLog(...)                 <- сериализация + UI, синхронно
+--//
+--// Из-за этого спам-ремоут (100+ вызовов/сек) задерживал отправку
+--// остальных ремоутов: до реального FireServer стоял разбор стека,
+--// а после него — тяжёлый QueueLog, блокирующий следующий вызов.
+--//
+--// Теперь:
+--//   1) дёшево снимаем вызывающие функции (только debug.info)
+--//   2) быстрый клон аргументов (фиксируем значения ДО отправки)
+--//   3) РЕАЛЬНЫЙ ВЫЗОВ — СРАЗУ
+--//   4) разбор стека + логирование — в воркере, сброс раз в кадр
+local LogQueue = {}
+local LogQueueTail = 0
+local LogWorkerStarted = false
+
 function Process:Merge(Base: table, New: table)
     if not New then return end
 	for Key, Value in next, New do
@@ -127,6 +149,50 @@ function Process:Init(Data)
     Hook = Modules.Hook
     Communication = Modules.Communication
     ReturnSpoofs = Modules.ReturnSpoofs
+
+	--// Воркер очереди логов (Cobalt: Heartbeat + LogNotificationQueue)
+	if not LogWorkerStarted then
+		LogWorkerStarted = true
+		task.spawn(function()
+			while true do
+				task.wait()
+
+				local Ok, Error = pcall(function()
+					Process:FlushLogQueue()
+				end)
+
+				if not Ok then
+					warn("Cobalt/Sigma: log queue flush failed:", Error)
+				end
+			end
+		end)
+	end
+end
+
+--// Сброс очереди логов. Вызывается воркером раз в кадр.
+function Process:FlushLogQueue()
+	if LogQueueTail == 0 then return end
+
+	local Batch = LogQueue
+	local Count = LogQueueTail
+	LogQueue = {}
+	LogQueueTail = 0
+
+	for Index = 1, Count do
+		local Entry = Batch[Index]
+		Batch[Index] = nil
+
+		if Entry then
+			local Data = Entry.Data
+
+			--// Разбор стека — здесь, в воркере (функции уже захвачены)
+			if Entry.Functions then
+				self:ResolveCallers(Data, Entry.Functions)
+			end
+
+			Communication:QueueLog(Data)
+		end
+	end
 end
 
 --// Communication
@@ -210,6 +276,42 @@ function Process:DeepCloneTable(Table, Ignore: table?, Visited: table?): table
     end
 
     return New
+end
+
+--// =====================================================================
+--// БЫСТРЫЙ КЛОН АРГУМЕНТОВ (горячий путь)
+--// =====================================================================
+--// Arguments надо зафиксировать ДО отправки (иначе игра успеет их
+--// изменить после вызова). Но DeepCloneTable слишком тяжёлый: он зовёт
+--// Communication:WaitCheck() на КАЖДОЕ значение. Здесь — лёгкий клон
+--// без WaitCheck/cloneref: только структура таблиц, Instances по ссылке.
+function Process:CloneValueFast(Value: any, Cache: table?): any
+    if type(Value) ~= "table" then return Value end
+
+    local New = {}
+    Cache = Cache or {}
+
+    if Cache[Value] then
+        return Cache[Value]
+    end
+    Cache[Value] = New
+
+    for Key, Item in next, Value do
+        New[Key] = self:CloneValueFast(Item, Cache)
+    end
+
+    return New
+end
+
+function Process:CloneArgs(...)
+    local Packed = table.pack(...)
+    local Result = table.create(Packed.n)
+
+    for Index = 1, Packed.n do
+        Result[Index] = self:CloneValueFast(Packed[Index])
+    end
+
+    return Result
 end
 
 --// Глубокое сравнение для дедупликации логов (Detect Spam).
@@ -326,8 +428,8 @@ function Process:RemoteAllowed(Remote: Event, TransferType: string, Method: stri
 	if not ClassData then return end
 
     --// Check if the transfer type has data
-	local Allowed = ClassData[TransferType]
-	if not Allowed then return end
+    local Allowed = ClassData[TransferType]
+    if not Allowed then return end
 
     --// Check if the method is allowed
 	if Method then
@@ -362,13 +464,16 @@ function Process:SetNewReturnSpoofs(NewReturnSpoofs: table)
     ReturnSpoofs = NewReturnSpoofs
 end
 
+--// =====================================================================
+--// РАЗБОР ВЫЗЫВАЮЩИХ (перенесён с горячего пути в воркер)
+--// =====================================================================
 --// [FIX] ВСЕ не-Sigma Lua-фреймы + script-хинты с C-фреймов.
 --// Probe v6 (2026-11-03): стек на Delta ДОСТУПЕН. C-фреймы имеют l == -1,
 --// но это НЕ конец стека — идём, пока debug.info(Level,"f") не nil.
 --// C-фреймы в Result не добавляем, но их env.script (владелец потока/
 --// загрузчик) собираем в Hints. identity 8 поднимается ЛЕНИВО — только
 --// если getfenv упал. Страховка на executor'ы без identity-функций.
-function Process:FindCallingClosures(_Offset: number?): (table, table)
+function Process:ResolveClosures(Functions: { any }): (table, table)
     local Getfenv = Hook:GetOriginalFunc(getfenv)
     local Result = {}
     local Hints = {}
@@ -385,10 +490,7 @@ function Process:FindCallingClosures(_Offset: number?): (table, table)
         setthreadidentity(8)
     end
 
-    for Level = 1, 16 do
-        local Function = debug.info(Level, "f")
-        if not Function then break end
-
+    for _, Function in Functions do
         if Seen[Function] then continue end
         Seen[Function] = true
 
@@ -427,7 +529,76 @@ function Process:FindCallingClosures(_Offset: number?): (table, table)
     return Result, Hints
 end
 
+--// Дёшево снимает список вызывающих функций (только debug.info).
+--// Вызывается НА ГОРЯЧЕМ ПУТИ, до реального вызова ремоута:
+--// стек здесь ещё живой, а getfenv/скрипты — уже нет.
+--// ВАЖНО: диапазон уровней 1..16 — как в оригинальной FindCallingClosures
+--// (там Offset был помечен "_" и игнорировался). Не сужать диапазон,
+--// иначе изменится атрибуция SourceScript/CallerScript.
+function Process:GetCallingFunctions(Offset: number?): { any }
+    local Functions = {}
+    local Seen = {}
+
+    for Level = 1, 16 do
+        local Function = debug.info(Level, "f")
+        if not Function then break end
+        if Seen[Function] then continue end
+        Seen[Function] = true
+
+        table.insert(Functions, Function)
+    end
+
+    return Functions
+end
+
+--// Разбор вызывающих — уже в воркере (функции захвачены заранее).
+function Process:ResolveCallers(Data: RemoteData, Functions: { any })
+    --// Fallback: если стек пуст — getcallingscript() (владелец потока)
+    if not Data.SourceScript then
+        Data.SourceScript = Data.CallingScript
+    end
+
+    local Closures, Hints = self:ResolveClosures(Functions)
+
+    local SourceIndex = nil
+    for i, F in Closures do
+        local S = self:GetScriptFromFunc(F)
+        if typeof(S) == "Instance" then
+            Data.CallingFunction = F
+            Data.SourceScript = S
+            SourceIndex = i
+            break
+        end
+    end
+
+    if not SourceIndex then return end
+
+    --// 1) хинты (C-фреймы: владелец потока/загрузчик)
+    for _, Hint in Hints do
+        if typeof(Hint) == "Instance" and Hint ~= Data.SourceScript then
+            Data.CallerScript = Hint
+            break
+        end
+    end
+
+    --// 2) fallback: скрипт следующего Lua-фрейма
+    if not Data.CallerScript then
+        for i = SourceIndex + 1, #Closures do
+            local S = self:GetScriptFromFunc(Closures[i])
+            if typeof(S) == "Instance" and S ~= Data.SourceScript then
+                Data.CallerFunction = Closures[i]
+                Data.CallerScript = S
+                break
+            end
+        end
+    end
+end
+
 --// Обратная совместимость: первый (ближайший) вызывающий closure
+function Process:FindCallingClosures(Offset: number?): (table, table)
+    return self:ResolveClosures(self:GetCallingFunctions(Offset))
+end
+
 function Process:FindCallingLClosure(Offset: number)
     return self:FindCallingClosures(Offset)[1]
 end
@@ -455,7 +626,7 @@ function Process:Decompile(Script: LocalScript | ModuleScript): string
         Body = Bytecode,
         Method = "POST",
         Headers = {
-            ["Content-Type"] = "text/plain"
+            ["Content-Type"] = "application/json"
         },
     })
 
@@ -676,74 +847,50 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         end
     end
 
-    local CallingFunction
-    local SourceScript
-    local CallerScript = nil
-    local CallerFunction = nil
+    --// ------------------------------------------------------------------
+    --// ГОРЯЧИЙ ПУТЬ. Здесь допустимо только ДЁШЕВОЕ.
+    --// ------------------------------------------------------------------
+
+    --// 1) Снимаем вызывающие функции (только debug.info — стек ещё живой).
+    --//    Разбор env/скриптов делается позже, в воркере.
+    local CallingFunctions = self:GetCallingFunctions(6)
+
+    --// 2) Фиксируем аргументы ДО отправки (иначе игра успеет их изменить)
+    local Args = self:CloneArgs(...)
 
     local ExtraData = self.ExtraData
     if ExtraData then
         self:Merge(Data, ExtraData)
     end
 
-    --// SourceScript = первый Lua-фрейм с валидным Instance (ClientCore).
-    --// CallerScript = первый хинт/скрипт, отличный от SourceScript
-    --// (C-фрейм на Delta несёт env.script загрузчика = Framework).
-    if not IsReceive then
-        local Closures, Hints = self:FindCallingClosures(6)
-
-        local SourceIndex = nil
-        for i, F in Closures do
-            local S = self:GetScriptFromFunc(F)
-            if typeof(S) == "Instance" then
-                CallingFunction = F
-                SourceScript = S
-                SourceIndex = i
-                break
-            end
-        end
-
-        if SourceIndex then
-            --// 1) хинты (C-фреймы: владелец потока/загрузчик)
-            for _, Hint in Hints do
-                if typeof(Hint) == "Instance" and Hint ~= SourceScript then
-                    CallerScript = Hint
-                    break
-                end
-            end
-
-            --// 2) fallback: скрипт следующего Lua-фрейма
-            if not CallerScript then
-                for i = SourceIndex + 1, #Closures do
-                    local S = self:GetScriptFromFunc(Closures[i])
-                    if typeof(S) == "Instance" and S ~= SourceScript then
-                        CallerFunction = Closures[i]
-                        CallerScript = S
-                        break
-                    end
-                end
-            end
-        end
-    end
-
     local CallingScript = getcallingscript()
     self:Merge(Data, {
         Remote = cloneref(Remote),
 		CallingScript = CallingScript,
-        CallingFunction = CallingFunction,
-        --// Fallback: если стек пуст — getcallingscript() (владелец потока)
-        SourceScript = SourceScript or CallingScript,
-        CallerScript = CallerScript,
+        --// CallingFunction/SourceScript/CallerScript — заполняются
+        --// в воркере (ResolveCallers), после реального вызова.
+        CallingFunction = nil,
+        SourceScript = nil,
+        CallerScript = nil,
         Id = Id,
 		ClassData = ClassData,
         Timestamp = Timestamp,
-        Args = {...}
+        Args = Args
     })
 
+    --// 3) РЕАЛЬНЫЙ ВЫЗОВ РЕМОУТА — СРАЗУ.
+    --//    Ни разбора стека, ни сериализации до него: спам-ремоут
+    --//    не должен задерживать отправку остальных.
     local ReturnValues = ProcessCallback(Data, Remote, ...)
     Data.ReturnValues = ReturnValues
 
-    Communication:QueueLog(Data)
+    --// 4) Логирование — в очередь. Разбор стека + сериализация + UI
+    --//    выполняются в воркере (Process:FlushLogQueue), раз в кадр.
+    LogQueueTail += 1
+    LogQueue[LogQueueTail] = {
+        Data = Data,
+        Functions = CallingFunctions,
+    }
 
     return ReturnValues
 end

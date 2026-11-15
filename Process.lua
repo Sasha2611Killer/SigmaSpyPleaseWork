@@ -743,11 +743,6 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     local ReturnValues = ProcessCallback(Data, Remote, ...)
     Data.ReturnValues = ReturnValues
 
-    --// [DEBUG] Видно, срабатывает ли хук вообще
-    if Config and Config.Debug then
-        print("[SPY-DBG] hook caught:", tostring(Remote), Method, "IsReceive:", tostring(IsReceive))
-    end
-
     Communication:QueueLog(Data)
 
     return ReturnValues

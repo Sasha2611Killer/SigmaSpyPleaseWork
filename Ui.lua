@@ -1307,22 +1307,6 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptSignal)
 	-- // Тулбар: всего подписок + массовое снятие
 	local Toolbar = Window:Row()
 	Toolbar:Label({ Text = `Total: {Count}` })
-	Toolbar:Button({
-		Text = "Disable all",
-		Callback = function()
-			for _, Connection in Connections do
-				pcall(function() Connection:Disable() end)
-			end
-		end,
-	})
-	Toolbar:Button({
-		Text = "Enable all",
-		Callback = function()
-			for _, Connection in Connections do
-				pcall(function() Connection:Enable() end)
-			end
-		end,
-	})
 	Toolbar:Expand()
 
 	-- // Скролл: 24+ коннектов листаются колесом, шапка окна остаётся на месте

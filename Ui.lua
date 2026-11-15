@@ -46,7 +46,7 @@ local Ui = {
     Window = nil,
     RandomSeed = Random.new(tick()),
 	Logs = setmetatable({}, {__mode = "k"}),
-	LogQueue = {}, --// [FIX] было {__mode = "v"}: лог держится ТОЛЬКО в очереди между вставкой и дренажем → GC мог его собрать (потеря логов)
+	LogQueue = setmetatable({}, {__mode = "v"}),
 } 
 
 type table = {
@@ -1563,12 +1563,6 @@ function Ui:ClearLogs()
 end
 
 function Ui:QueueLog(Data)
-	--// [DEBUG] Печатаем ДО guard'а — видно, доходят ли логи вообще
-	--// и переживают ли инстансы канал
-	if Config and Config.Debug then
-		print("[SPY-DBG] Ui:QueueLog item, Remote type:", typeof(Data and Data.Remote), "Method:", tostring(Data and Data.Method))
-	end
-
 	--// Guard: логи из actor-VM могут приходить с Remote == nil
 	--// (инстанс не пережил пересечение границы Lua-state через канал).
 	--// attempt to index nil with 'Parent' в CreateLog лечится здесь.
@@ -1616,16 +1610,12 @@ end
 
 function Ui:ProcessLogQueue()
 	local Queue = self.LogQueue
-	local Count = #Queue
-    if Count <= 0 then return end
+    if #Queue <= 0 then return end
 
-	--// [FIX] Снимок + table.clear: старый цикл делал table.remove(Queue, Index)
-	--// ВО ВРЕМЯ next-итерации — элементы пропускались
-    local Batch = table.move(Queue, 1, Count, 1, table.create(Count))
-    table.clear(Queue)
-
-	for Index = 1, Count do
-        self:CreateLog(Batch[Index])
+	--// Create a log element for each in the Queue
+    for Index, Data in next, Queue do
+        self:CreateLog(Data)
+        table.remove(Queue, Index)
     end
 end
 

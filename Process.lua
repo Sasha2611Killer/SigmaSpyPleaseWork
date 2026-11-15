@@ -326,7 +326,9 @@ end
 
 function Process:CheckValue(Value, Ignore: table?, Cache: table?)
     local Type = typeof(Value)
-    Communication:WaitCheck()
+
+    --// [FIX] Убран вызов Communication:WaitCheck() — он был yield'ом
+    --// на КАЖДОЕ значение (см. Communication.new.lua).
 
     if Type == "table" then
         Value = self:DeepCloneTable(Value, Ignore, Cache)

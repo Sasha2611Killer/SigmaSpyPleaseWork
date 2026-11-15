@@ -1288,11 +1288,6 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptSignal)
 		return self:ViewCallback(RemoteName, Signal)
 	end
 
-	local Window = self:CreateWindow({
-		Title = `Connections for: {RemoteName}`,
-		Size = UDim2.fromOffset(1000, 300),
-	})
-
 	-- // Колонки. WrittenIn — синтетическая, её нельзя слать в FilterConnections
 	local ToDisplay = {
 		"Enabled", "ForeignState", "LuaConnection", "Function", "Thread", "Script", "WrittenIn",
@@ -1302,15 +1297,50 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptSignal)
 	}
 
 	local Connections = Process:FilterConnections(Signal, Properties)
+	local Count = #Connections
 
-	local Table = Window:Table({
+	local Window = self:CreateWindow({
+		Title = `Connections for: {RemoteName} ({Count})`,
+		Size = UDim2.fromOffset(1000, 400),
+	})
+
+	-- // Тулбар: всего подписок + массовое снятие
+	local Toolbar = Window:Row()
+	Toolbar:Label({ Text = `Total: {Count}` })
+	Toolbar:Button({
+		Text = "Disable all",
+		Callback = function()
+			for _, Connection in Connections do
+				pcall(function() Connection:Disable() end)
+			end
+		end,
+	})
+	Toolbar:Button({
+		Text = "Enable all",
+		Callback = function()
+			for _, Connection in Connections do
+				pcall(function() Connection:Enable() end)
+			end
+		end,
+	})
+	Toolbar:Expand()
+
+	-- // Скролл: 24+ коннектов листаются колесом, шапка окна остаётся на месте
+	local Scroll = Window:Canvas({
+		Scroll = true,
+		UiPadding = 5,
+		AutomaticSize = Enum.AutomaticSize.None,
+		Size = UDim2.new(1, 0, 1, 0),
+	})
+
+	local Table = Scroll:Table({
 		Border = true,
 		RowBackground = true,
 		MaxColumns = 7,
 	})
 
 	-- // Короткий текст для ячейки (в буфер идёт полное значение)
-	local CellLimit = 22
+	local CellLimit = 18
 	local function ShortText(Value)
 		local String = tostring(Value):gsub("[\n\r\t]+", " ")
 		if #String > CellLimit then
@@ -1328,7 +1358,7 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptSignal)
 		Function  = function(v) return HexTail(v, "fn ") end,          -- fn …e5ba
 		Thread    = function(v) return HexTail(v, "th ") end,          -- th …17e8
 		Script    = function(v) return typeof(v) == "Instance" and v.Name or "?" end,
-		WrittenIn = function(v)                                        -- ClientRemoteProperty:42
+		WrittenIn = function(v)                                        -- MatchController:31
 			local String = tostring(v)
 			local Path, Line = String:match("^(.-):(%d+)")
 			if not Path then return ShortText(String) end
@@ -1381,19 +1411,17 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptSignal)
 			})
 		end,
 
-		["Thread"]    = function(Row, Value) CopyButton(Row, Value) end,  -- "thread: 0x..."
-		["Function"]  = function(Row, Value) CopyButton(Row, Value) end,  -- "function: 0x..."
-		["WrittenIn"] = function(Row, Value) CopyButton(Row, Value) end,  -- "src:line (name)"
+		["Thread"]    = function(Row, Value) CopyButton(Row, Value) end,
+		["Function"]  = function(Row, Value) CopyButton(Row, Value) end,
+		["WrittenIn"] = function(Row, Value) CopyButton(Row, Value) end,
 	}
 
 	-- // Скрипт-источник соединения: 3 захода
 	local function GetConnectionScript(Connection)
-		-- 1) поле .Script от executor'а
 		if typeof(Connection.Script) == "Instance" then
 			return Connection.Script
 		end
 
-		-- 2) скрипт потока (работает для C-closures / loadstring)
 		if Connection.Thread and typeof(getscriptfromthread) == "function" then
 			local Ok, Script = pcall(getscriptfromthread, Connection.Thread)
 			if Ok and typeof(Script) == "Instance" then
@@ -1401,7 +1429,6 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptSignal)
 			end
 		end
 
-		-- 3) env функции
 		local Fn = Connection.Function
 		if typeof(Fn) == "function" then
 			local Ok, FromEnv = pcall(function()
@@ -1435,7 +1462,6 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptSignal)
 
 		for _, Property in ToDisplay do
 			local Column = Row:NextColumn()
-			local ColumnRow = Column:Row()
 
 			local Value
 			if Property == "Script" then
@@ -1446,13 +1472,18 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptSignal)
 				Value = Connection[Property]
 			end
 
-			-- // Короткая подпись, чтобы кнопки не выпихивало за край
 			local Shown = Display[Property] and Display[Property](Value) or ShortText(Value)
-			ColumnRow:Label({ Text = Shown })
 
+			-- // Текст сверху
+			Column:Label({
+				Text = Shown,
+				TextXAlignment = Enum.TextXAlignment.Left,
+			})
+
+			-- // Кнопки снизу, своей строкой
 			local Callback = ButtonsForValues[Property]
 			if Callback then
-				Callback(ColumnRow, Value, Connection)
+				Callback(Column:Row(), Value, Connection)
 			end
 		end
 	end

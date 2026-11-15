@@ -23,11 +23,6 @@ local Channel
 local Config
 local Process
 
---// Кэш Fire/Event для Channel (ChannelIndex дёргает Hook:Index →
---// getthreadidentity/setthreadidentity на КАЖДЫЙ вызов Communicate)
-local CachedFire: any = nil
-local CachedEvent: any = nil
-
 function Module:Init(Data)
     local Modules = Data.Modules
     local Services = Data.Services
@@ -48,23 +43,11 @@ function CommWrapper:ProcessArguments(Arguments)
     Channel:Fire(Process:Unpack(Arguments))
 end
 
---// [FIX] Было:
---//     for Index = 1, #Queue do
---//         local Arguments = table.remove(Queue)   -- с КОНЦА (LIFO!)
---//     end
---// Проблемы: порядок обратный, #Queue — снимок на старте,
---// table.remove с конца O(1) но порядок ломается.
---// Теперь: снимок + чистка + обход в порядке FIFO.
 function CommWrapper:ProcessQueue()
     local Queue = self.Queue
-    local Count = #Queue
-    if Count == 0 then return end
 
-    local Batch = table.move(Queue, 1, Count, 1, {})
-    table.clear(Queue)
-
-    for Index = 1, Count do
-        local Arguments = Batch[Index]
+    for Index = 1, #Queue do
+        local Arguments = table.remove(Queue)
         pcall(function()
             self:ProcessArguments(Arguments) 
         end)
@@ -166,38 +149,12 @@ function Module:CheckValue(Value, Inbound: boolean?)
     return self:SerializeTable(Value)
 end
 
---// =====================================================================
---// [FIX] WaitCheck: УБРАН wait()
---// =====================================================================
---// Было:
---//     local Tick = 0
---//     function Module:WaitCheck()
---//         Tick += 1
---//         if Tick > 40 then
---//             Tick = 0
-----             wait()          -- <<< YIELD = ПОТЕРЯ КАДРА
---//         end
---!end
---
---// wait() — это yield, а yield в Roblox стоит КАДР. WaitCheck дёргается
---// на КАЖДОЕ значение при сериализации/десериализации аргументов.
---// Плюс task.spawn в QueueLog стартует НЕМЕДЛЕННО (до первого yield),
---// т.е. сериализация первого лога шла НА ИГРОВОМ ТРЕДЕ — и wait() внутри
---// подвешивал скрипт, вызвавший FireServer. Отсюда и задержка: скрипт
---// висел до следующего кадра, и второй ремоут уходил с задержкой.
---
---// Теперь WaitCheck — просто счётчик (API сохранён).
---// Если нужен именно yield (экзотичные экзекуторы) — включается флагом.
 local Tick = 0
 function Module:WaitCheck()
     Tick += 1
-
-    --// Экзотика: восстановление старого поведения по требованию
-    if Config and Config.YieldInSerialization then
-        if Tick > 40 then
-            Tick = 0
-            wait()
-        end
+    if Tick > 40 then
+        Tick = 0 -- I could use modulus here but the interger will be massive
+        wait()
     end
 end
 
@@ -255,59 +212,34 @@ end
 
 function Module:SetChannel(NewChannel: number)
     Channel = NewChannel
-
-    --// Канал сменился — сбрасываем кэш Fire/Event
-    CachedFire = nil
-    CachedEvent = nil
 end
 
 function Module:ConsolePrint(...)
     self:Communicate("Print", ...)
 end
 
---// =====================================================================
---// [FIX] Очередь логов: без table.remove(LogQueue, 1)
---// =====================================================================
---// Было:
---//     while #LogQueue > 0 do
---//         local Item = table.remove(LogQueue, 1)   -- <<< O(n) сдвиг!
---//
---// На флуде (1000+ логов) это O(n²) — миллионы перемещений элементов
---// на каждый проход. Плюс table.insert в начало/конец.
---// Теперь — очередь на указателях (head/tail), без сдвигов.
+--// Батчинг (Cobalt-style): один поток-флашер вместо spawn() на каждый лог.
+--// При флуде это убирает тысячи короткоживущих тредов и даёт точку
+--// троттлинга (task.wait каждые N логов).
 local LogQueue = {}
-local LogQueueHead = 1
-local LogQueueTail = 0
 local LogFlushing = false
 
 function Module:QueueLog(Data)
-    LogQueueTail += 1
-    LogQueue[LogQueueTail] = Data
+    table.insert(LogQueue, Data)
 
     if LogFlushing then return end
     LogFlushing = true
 
     task.spawn(function()
         local Count = 0
-
-        while LogQueueHead <= LogQueueTail do
-            local Item = LogQueue[LogQueueHead]
-            LogQueue[LogQueueHead] = nil
-            LogQueueHead += 1
-
-            --// Очередь опустела — сбрасываем указатели
-            if LogQueueHead > LogQueueTail then
-                LogQueue = {}
-                LogQueueHead = 1
-                LogQueueTail = 0
-            end
-
+        while #LogQueue > 0 do
+            local Item = table.remove(LogQueue, 1)
             if Item then
                 local Ok, Err = pcall(function()
                     local SerializedArgs = self:SerializeTable(Item.Args)
                     Item.Args = SerializedArgs
                     self:Communicate("QueueLog", Item)
-               	end)
+                end)
 
                 if not Ok then
 		-- не warn: строка ошибки может содержать имена функций из списка АС
@@ -320,7 +252,6 @@ function Module:QueueLog(Data)
                 end
             end
         end
-
         LogFlushing = false
     end)
 end
@@ -344,20 +275,8 @@ function Module:ChannelIndex(Channel, Property: string)
     return Channel[Property]
 end
 
---// [FIX] Кэш Fire: Hook:Index() дёргает getthreadidentity/setthreadidentity
---// на КАЖДЫЙ Communicate — это лишние переключения thread identity
---// на каждый лог.
-local function GetChannelFire()
-    local Fire = CachedFire
-    if not Fire then
-        Fire = Module:ChannelIndex(Channel, "Fire")
-        CachedFire = Fire
-    end
-    return Fire
-end
-
 function Module:Communicate(...)
-    local Fire = GetChannelFire()
+    local Fire = self:ChannelIndex(Channel, "Fire")
     local identity = getthreadidentity()
     setthreadidentity(8)
     Fire(Channel, ...)
@@ -365,21 +284,12 @@ function Module:Communicate(...)
 end
 
 function Module:AddConnection(Callback): RBXScriptConnection
-    local Event = CachedEvent
-    if not Event then
-        Event = self:ChannelIndex(Channel, "Event")
-        CachedEvent = Event
-    end
+    local Event = self:ChannelIndex(Channel, "Event")
     return Event:Connect(Callback)
 end
 
 function Module:AddTypeCallback(Type: string, Callback): RBXScriptConnection
-    local Event = CachedEvent
-    if not Event then
-        Event = self:ChannelIndex(Channel, "Event")
-        CachedEvent = Event
-    end
-
+    local Event = self:ChannelIndex(Channel, "Event")
     return Event:Connect(function(RecivedType: string, ...)
         if RecivedType ~= Type then return end
         Callback(...)

@@ -52,9 +52,11 @@ local Ui = {
 
 	--// Cobalt-style лимиты на создание UI-элементов.
 	--// (Cobalt: Ratelimiter { Time = 0.1, Max = 2 } в Calls.luau)
-	--// Без этого флуд от спам-ремоута подвешивает UI и игру.
-	MaxLogsPerFrame = 4,
-	LogFrameDelay = 0.05,
+	--// ВАЖНО: в Roblox всё Lua (UI + игровые скрипты) живёт на ОДНОМ
+	--// scheduler — поэтому лимит ограничивает не "отрисовку", а общий
+	--// бюджет кадра. 2 элемента за 0.1 с = как в Cobalt.
+	MaxLogsPerFrame = 2,
+	LogFrameDelay = 0.1,
 }
 
 type table = {
@@ -1698,8 +1700,9 @@ function Ui:CreateLog(Data: Log)
 	--// Deserialize arguments
 	Args = Communication:DeserializeTable(Args)
 
-	--// Deep clone data (единственный клон на лог)
-	local ClonedArgs = Process:DeepCloneTable(Args)
+	--// Лёгкий клон (без WaitCheck на КАЖДОЕ значение — DeepCloneTable
+	--// звал Communication:WaitCheck() и на спаме это съедало кадр)
+	local ClonedArgs = Process:CloneTableFast(Args)
 	Data.Args = ClonedArgs
 	Data.ValueSwaps = Generation:MakeValueSwapsTable(Timestamp)
 

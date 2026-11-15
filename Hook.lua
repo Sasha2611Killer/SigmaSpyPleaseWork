@@ -174,7 +174,11 @@ end
 --// Спам-ремоут не должен блокировать игровой тред. Логируем не чаще
 --// MAX_LOGS_PER_SECOND раз в секунду на ремоут; сам вызов ремоута
 --// при этом происходит ВСЕГДА и без задержки.
-local MAX_LOGS_PER_SECOND = 30
+--// Бюджет захвата — аварийный предохранитель, а не основной механизм.
+--// При батчинге канала (InstallChannelBatching) он не нужен: спамный
+--// ремоут должен быть виден ПОЛНОСТЬЮ, как в Cobalt.
+--// 0 = без ограничений (рекомендуется), 30 = жёсткий лимит.
+local MAX_LOGS_PER_SECOND = 0
 
 --// Раздельные бюджеты на Send/Receive: спам исходящих не должен
 --// глушить входящие логи того же ремоута (и наоборот).
@@ -197,6 +201,7 @@ end
 local function AllowCapture(Kind: string, Instance): boolean
 	local Budget = CaptureBudgets[Kind]
 	if not Budget then return true end
+	if MAX_LOGS_PER_SECOND <= 0 then return true end
 
 	local Now = tick()
 	local Entry = Budget.Entries[Instance]
@@ -216,6 +221,71 @@ local function AllowCapture(Kind: string, Instance): boolean
 
 	Entry.Count += 1
 	return Entry.Count <= MAX_LOGS_PER_SECOND
+end
+
+--// =====================================================================
+--// 3) БАТЧИНГ КАНАЛА (Cobalt: LogNotificationQueue + Heartbeat)
+--// =====================================================================
+--// ПРОБЛЕМА: Communication:Fire("RemoteData", ...) — СИНХРОННЫЙ вызов
+--// (BindableEvent:Fire зовёт обработчики inline). Тяжёлое логирование
+--// вставало ПЕРЕД реальным вызовом ремоута:
+--//
+--//     remote:FireServer(x)
+--//       → __namecall хук
+--//           → Process:ProcessRemote
+--//               → сериализация
+--//               → Communication:Fire   ← UI-работа ЗДЕСЬ, синхронно
+--//           → OriginalFunc(self, ...)  ← только теперь реальный FireServer
+--//
+--// СПАМ-РЕМОУТ (100 вызовов/сек) → каждый вызов ждал UI-работу предыдущего
+--// → другие ремоуты уходили с задержкой.
+--//
+--// РЕШЕНИЕ (принцип Cobalt): fire откладывается до конца кадра.
+--// Сам вызов ремоута уходит СРАЗУ, UI получает пачку один раз за кадр.
+--// Плюс: спамный ремоут виден ПОЛНОСТЬЮ (как в Cobalt) — бюджет не нужен.
+local BATCH_REMOTE_DATA = true
+
+local RemoteDataQueue = {}
+local RemoteDataCount = 0
+
+local function InstallChannelBatching(Communication)
+	if not BATCH_REMOTE_DATA then return end
+	if type(Communication) ~= "table" then return end
+	if Communication.__SigmaBatched then return end
+
+	local OriginalFire = Communication.Fire
+	if type(OriginalFire) ~= "function" then return end
+
+	Communication.__SigmaBatched = true
+
+	Communication.Fire = function(self, Type, ...)
+		--// Только RemoteData батчим — остальные типы как есть
+		if Type == "RemoteData" then
+			RemoteDataCount += 1
+			RemoteDataQueue[RemoteDataCount] = table.pack(self, Type, ...)
+			return
+		end
+
+		return OriginalFire(self, Type, ...)
+	end
+
+	task.spawn(function()
+		while true do
+			task.wait()
+
+			if RemoteDataCount == 0 then continue end
+
+			local Batch = RemoteDataQueue
+			local Count = RemoteDataCount
+			RemoteDataQueue = {}
+			RemoteDataCount = 0
+
+			for Index = 1, Count do
+				local Packed = Batch[Index]
+				OriginalFire(table.unpack(Packed, 1, Packed.n))
+			end
+		end
+	end)
 end
 
 --// Modules
@@ -985,6 +1055,10 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 	--// Init libraries
 	Communication:Init(InitData)
 	ProcessLib:Init(InitData)
+
+	--// Cobalt-style батчинг канала: fire откладывается до конца кадра,
+	--// реальный вызов ремоута уходит сразу (см. InstallChannelBatching)
+	pcall(InstallChannelBatching, Communication)
 
 	--// Communication configuration
 	local Channel, IsWrapped = Communication:GetCommChannel(ChannelId)

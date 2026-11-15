@@ -571,11 +571,6 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 		end
 	})
 	
-	--// [DEBUG] Отладка приёма на стороне хука
-	if Config.Debug then
-		print("[SPY-DBG] hook side connected, channel:", ChannelId)
-	end
-	
 	--// Process configuration
 	ProcessLib:SetChannel(Channel, IsWrapped)
 	ProcessLib:SetExtraData(ExtraData)

@@ -1546,40 +1546,6 @@ function Ui:GetRemoteHeader(Data: Log)
 	Logs[Id] = HeaderData
 	return HeaderData
 end
-		
-Ui.LaneConfig = {
-	FrameBudget     = 0.002,   -- максимум секунд на UI-логи за кадр
-	MaxPerLane      = 2,       -- сколько записей берём из одного remote за кадр
-	MaxQueuePerLane = 200,     -- больше — старые выкидываем
-	SpamLimit       = 30,      -- вызовов на remote за окно
-	SpamWindow      = 0.1,     -- окно, секунды
-}
-		
-local Lanes     = {}   -- [Id] = { Items = {}, Dropped = 0 }
-local LaneOrder = {}   -- круговая очередь Id
-local Cursor    = 1
-local RateTable = {}   -- [Id] = { Start, Count, Dropped }
-local GateTable = {}   -- ["Id|Method"] = последние Args (ссылка, без клона)
-
-local function ShallowEqual(A, B)
-	if A == B then return true end
-	if type(A) ~= "table" or type(B) ~= "table" then return false end
-	if #A ~= #B then return false end
-
-	for Index = 1, math.min(#A, 8) do
-		if A[Index] ~= B[Index] then return false end
-	end
-
-	return true
-end		
-		
-local function ResetLanes()
-	table.clear(Lanes)
-	table.clear(LaneOrder)
-	table.clear(RateTable)
-	table.clear(GateTable)
-	Cursor = 1
-end		
 
 function Ui:ClearLogs()
 	local Logs = self.Logs
@@ -1592,47 +1558,22 @@ function Ui:ClearLogs()
 	--// Ранний дедуп-счётчик тоже сбрасываем
 	self.DedupStore = nil
 
-	--// Очереди/бюджеты lane'ов
-	ResetLanes()
-
 	--// Clear logs from memory
 	table.clear(Logs)
 end
 
 function Ui:QueueLog(Data)
 	--// Guard: логи из actor-VM могут приходить с Remote == nil
+	--// (инстанс не пережил пересечение границы Lua-state через канал).
+	--// attempt to index nil with 'Parent' в CreateLog лечится здесь.
 	if typeof(Data.Remote) ~= "Instance" then
 		return
 	end
 
-	local Config = self.LaneConfig
-	local Id     = Data.Id
-	local Method = Data.Method
-	local Now    = os.clock()
-
-	--// 1) Бюджет на remote: спамер не съедает кадры остальных
-	local Rate = RateTable[Id]
-	if not Rate or Now - Rate.Start > Config.SpamWindow then
-		Rate = { Start = Now, Count = 0, Dropped = 0 }
-		RateTable[Id] = Rate
-	end
-
-	Rate.Count += 1
-	if Rate.Count > Config.SpamLimit then
-		Rate.Dropped += 1
-		return
-	end
-
-	--// 2) Дешёвый гейт: тот же вызов, что предыдущий (без клонов и DeepEquals)
-	local Key  = Id .. "|" .. Method
-	local Last = GateTable[Key]
-
-	if Last and ShallowEqual(Data.Args, Last) then
-		return
-	end
-	GateTable[Key] = Data.Args
-
-	--// 3) Глубокий дедуп — только если включён флаг
+	--// [OPT] Ранний дедуп (IgnoreDuplicates): сравниваем СЫРЫЕ
+	--// сериализованные аргументы до десериализации/DeepClone/UI.
+	--// Спамные вызовы умирают сразу на входе. Ключ — Id ремоута,
+	--// хранение по методам (пинг-понг send/receive не пропускает).
 	local IgnoreDuplicates = Flags:GetFlagValue("IgnoreDuplicates")
 	if IgnoreDuplicates then
 		local Store = self.DedupStore
@@ -1641,6 +1582,8 @@ function Ui:QueueLog(Data)
 			self.DedupStore = Store
 		end
 
+		local Id = Data.Id
+		local Method = Data.Method
 		local ById = Store[Id]
 		if not ById then
 			ById = {}
@@ -1653,64 +1596,27 @@ function Ui:QueueLog(Data)
 		ById[Method] = Data.Args
 	end
 
-	--// 4) Клонируем только то, что реально прошло фильтры
-	Data.Args = Process:DeepCloneTable(Data.Args)
+	local LogQueue = self.LogQueue
+	Process:Merge(Data, {
+		Args = Process:DeepCloneTable(Data.Args),
+	})
 
 	if Data.ReturnValues then
-		Data.ReturnValues = Process:DeepCloneTable(Data.ReturnValues)
-	end
-
-	--// 5) Кладём в lane этого remote
-	local Lane = Lanes[Id]
-	if not Lane then
-		Lane = { Items = {}, Dropped = 0 }
-		Lanes[Id] = Lane
-		table.insert(LaneOrder, Id)
-	end
-
-	table.insert(Lane.Items, Data)
-
-	--// Не копим бесконечно: режем самые старые
-	local Excess = #Lane.Items - Config.MaxQueuePerLane
-	for _ = 1, Excess do
-		local Dropped = table.remove(Lane.Items, 1)
-		if not Dropped then break end
-		Lane.Dropped += 1
-	end
+        Data.ReturnValues = Process:DeepCloneTable(Data.ReturnValues)
+    end
+	
+    table.insert(LogQueue, Data)
 end
 
 function Ui:ProcessLogQueue()
-	local Config = self.LaneConfig
-	if #LaneOrder == 0 then return end
+	local Queue = self.LogQueue
+    if #Queue <= 0 then return end
 
-	local Deadline = os.clock() + Config.FrameBudget
-
-	while os.clock() < Deadline and #LaneOrder > 0 do
-		if Cursor > #LaneOrder then Cursor = 1 end
-
-		local Id   = LaneOrder[Cursor]
-		local Lane = Lanes[Id]
-
-		--// Lane опустел — убираем из круга
-		if not Lane or #Lane.Items == 0 then
-			Lanes[Id] = nil
-			table.remove(LaneOrder, Cursor)
-			if Cursor > #LaneOrder then Cursor = 1 end
-			continue
-		end
-
-		--// Честная доля: не больше MaxPerLane записей с этого remote
-		for _ = 1, Config.MaxPerLane do
-			local Data = table.remove(Lane.Items, 1)
-			if not Data then break end
-
-			self:CreateLog(Data)
-			if os.clock() >= Deadline then break end
-		end
-
-		Cursor += 1
-		if Cursor > #LaneOrder then Cursor = 1 end
-	end
+	--// Create a log element for each in the Queue
+    for Index, Data in next, Queue do
+        self:CreateLog(Data)
+        table.remove(Queue, Index)
+    end
 end
 
 function Ui:BeginLogService()
@@ -1721,7 +1627,7 @@ function Ui:BeginLogService()
 		end
 	end)()
 end
-		
+
 function Ui:FilterName(Name: string, CharacterLimit: number?): string
 	local Trimmed = Name:sub(1, CharacterLimit or 20)
 	local Filtred = Trimmed:gsub("[\n\r]", " ")

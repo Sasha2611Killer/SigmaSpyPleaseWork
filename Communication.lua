@@ -222,36 +222,64 @@ end
 --// При флуде это убирает тысячи короткоживущих тредов и даёт точку
 --// троттлинга (task.wait каждые N логов).
 local LogQueue = {}
+local LogQueueHead = 1
+local LogQueueTail = 0
 local LogFlushing = false
 
 function Module:QueueLog(Data)
-    table.insert(LogQueue, Data)
+    --// Только enqueue — никаких Fire и spawn'ов на каждый лог
+    LogQueueTail += 1
+    LogQueue[LogQueueTail] = Data
 
     if LogFlushing then return end
     LogFlushing = true
 
     task.spawn(function()
-        local Count = 0
-        while #LogQueue > 0 do
-            local Item = table.remove(LogQueue, 1)
-            if Item then
+        while LogQueueHead <= LogQueueTail do
+            --// Слить всё накопленное в один батч (Head/Tail, без table.remove)
+            local Batch = {}
+            local BatchSize = 0
+
+            while LogQueueHead <= LogQueueTail do
+                local Item = LogQueue[LogQueueHead]
+                LogQueue[LogQueueHead] = nil
+                LogQueueHead += 1
+
+                if Item then
+                    local Ok = pcall(function()
+                        Item.Args = self:SerializeTable(Item.Args)
+                    end)
+
+                    if Ok then
+                        BatchSize += 1
+                        Batch[BatchSize] = Item
+                    end
+                    --// Один битый лог не должен убить весь батч — просто пропускаем
+                end
+            end
+
+            --// Очередь опустела — сбрасываем указатели (как у Cobalt)
+            LogQueue = {}
+            LogQueueHead = 1
+            LogQueueTail = 0
+
+            if BatchSize > 0 then
                 local Ok, Err = pcall(function()
-                    local SerializedArgs = self:SerializeTable(Item.Args)
-                    Item.Args = SerializedArgs
-                    self:Communicate("QueueLog", Item)
+                    self:Communicate("QueueLog", Batch)
                 end)
 
                 if not Ok then
-		-- не warn: строка ошибки может содержать имена функций из списка АС
-		self:ConsolePrint("QueueLog error:", tostring(Err):sub(1, 120))
-	end
-
-                Count += 1
-                if Count % 25 == 0 then
-                    task.wait()
+                    -- не warn: строка ошибки может содержать имена функций из списка АС
+                    self:ConsolePrint("QueueLog error:", tostring(Err):sub(1, 120))
                 end
             end
+
+            table.clear(Batch)
+
+            --// [Cobalt] 1 батч = 1 кадр (у них Heartbeat, тут task.wait)
+            task.wait()
         end
+
         LogFlushing = false
     end)
 end

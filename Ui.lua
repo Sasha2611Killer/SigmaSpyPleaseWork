@@ -1,5 +1,7 @@
+--!nolint DeprecatedApi
+
 local Ui = {
-	DefaultEditorContent = [=[--[[
+    DefaultEditorContent = [=[--[[
 	Sigma Spy, written by depso
 	Hooks rewritten and many more fixes!
 
@@ -47,7 +49,13 @@ local Ui = {
     RandomSeed = Random.new(tick()),
 	Logs = setmetatable({}, {__mode = "k"}),
 	LogQueue = setmetatable({}, {__mode = "v"}),
-} 
+
+	--// Cobalt-style лимиты на создание UI-элементов.
+	--// (Cobalt: Ratelimiter { Time = 0.1, Max = 2 } в Calls.luau)
+	--// Без этого флуд от спам-ремоута подвешивает UI и игру.
+	MaxLogsPerFrame = 4,
+	LogFrameDelay = 0.05,
+}
 
 type table = {
 	[any]: any
@@ -134,10 +142,10 @@ end
 
 function Ui:TurnSeasonal(Text: string): string
     local SeasonLabels = self.SeasonLabels
-    local Month = os.date("%B")
-    local Base = SeasonLabels[Month]
+	local Month = os.date("%B")
+	local Base = SeasonLabels[Month]
 
-    return Base:format(Text)
+	return Base:format(Text)
 end
 
 function Ui:LoadFont()
@@ -239,12 +247,12 @@ type AskConfig = {
 }
 function Ui:AskUser(Config: AskConfig): string
 	local Window = self.Window
-	local Answered = false
+    local Answered = false
 
 	--// Create modal
-	local ModalWindow = Window:PopupModal({
-		Title = Config.Title
-	})
+    local ModalWindow = Window:PopupModal({
+        Title = Config.Title
+    })
 	ModalWindow:Label({
 		Text = table.concat(Config.Content, "\n"),
 		TextWrapped = true
@@ -302,7 +310,7 @@ function Ui:ShowModal(Lines: table)
 		Text = "Okay",
 		Callback = function()
 			ModalWindow:ClosePopup()
-		end,
+		end
 	})
 end
 
@@ -346,7 +354,7 @@ end
 function Ui:CheckKeybindLayout(Container, KeyCode: Enum.KeyCode, Callback)
 	if not KeyCode then return Container end
 
-	--// Create Row layout
+	--// Check for Row layout
 	Container = Container:Row({
 		HorizontalFlex = Enum.UIFlexAlignment.SpaceBetween
 	})
@@ -371,7 +379,7 @@ function Ui:CheckKeybindLayout(Container, KeyCode: Enum.KeyCode, Callback)
 end
 
 function Ui:CreateElements(Parent, Options)
-	local OptionTypes = self.OptionTypes
+    local OptionTypes = self.OptionTypes
 	
 	--// Create table layout
 	local Table = Parent:Table({
@@ -388,7 +396,7 @@ function Ui:CreateElements(Parent, Options)
 			Label = Name,
 		})
 		
-		--// Check if a element type exists for value type
+		--// Check for a element type exists for value type
 		local Class = Data.Class
 		assert(Class, `No {Type} type exists for option`)
 
@@ -413,7 +421,7 @@ function Ui:DisplayAura()
 
 	--// Aura (boiiiii)
     local AURA = Rand:NextInteger(1, 9999999)
-    local AURADELAY = Rand:NextInteger(1, 5)
+	local AURADELAY = Rand:NextInteger(1, 5)
 
 	--// Title
 	local Title = `Sigma Spy | AURA: {AURA}`
@@ -433,7 +441,7 @@ end
 
 function Ui:CreateWindowContent(Window)
     --// Window group
-    local Layout = Window:List({
+	local Layout = Window:List({
         UiPadding = 2,
         HorizontalFlex = Enum.UIFlexAlignment.Fill,
         VerticalFlex = Enum.UIFlexAlignment.Fill,
@@ -680,7 +688,7 @@ function Ui:MakeEditorTab(InfoSelector)
 					self:MakeEditorPopoutWindow(Script, {
 						Title = Tile
 					})
-				end
+				end,
 			},
 		}
 	})
@@ -801,15 +809,15 @@ end
 
 function Ui:RemovePreviousTab(Title: string): boolean
 	--// No previous tabs
-	if not ActiveData then 
-		return false 
-	end
+    if not ActiveData then 
+    	return false 
+    end
 
-	--// TabSelector
-	local InfoSelector = self.InfoSelector
+    --// TabSelector
+    local InfoSelector = self.InfoSelector
 
 	--// Previous elements
-	local PreviousTab = ActiveData.Tab
+    local PreviousTab = ActiveData.Tab
 	local PreviousSelectable = ActiveData.Selectable
 
 	--// Remove previous tab and set selectable focus
@@ -1134,7 +1142,7 @@ function Ui:SetFocusedRemote(Data)
 			end)
 		end)
 	end, function(Err)
-		-- не warn: консоль игры сканируется АС, шум не нужен
+		--// не warn: консоль игры сканируется АС, шум не нужен
 		self:ConsoleLog("RemoteOptions:", tostring(Err):sub(1, 160))
 	end)
 
@@ -1596,27 +1604,38 @@ function Ui:QueueLog(Data)
 		ById[Method] = Data.Args
 	end
 
+	--// [OPT] Клон аргументов делается ОДИН раз — в CreateLog
+	--// (там же Deserialize + DeepClone). Здесь второй клон был
+	--// лишним: на спаме это удваивало стоимость каждого вызова.
 	local LogQueue = self.LogQueue
-	Process:Merge(Data, {
-		Args = Process:DeepCloneTable(Data.Args),
-	})
-
-	if Data.ReturnValues then
-        Data.ReturnValues = Process:DeepCloneTable(Data.ReturnValues)
-    end
-	
-    table.insert(LogQueue, Data)
+	table.insert(LogQueue, Data)
 end
 
+--// Cobalt-style обработка очереди:
+--//   * снимок + очистка (next() по изменяемой таблице пропускает записи)
+--//   * бюджет на кадр (Cobalt: Ratelimiter { Time = 0.1, Max = 2 })
 function Ui:ProcessLogQueue()
 	local Queue = self.LogQueue
-    if #Queue <= 0 then return end
+	local Count = #Queue
+	if Count == 0 then return end
 
-	--// Create a log element for each in the Queue
-    for Index, Data in next, Queue do
-        self:CreateLog(Data)
-        table.remove(Queue, Index)
-    end
+	--// Снимок: новые логи, пришедшие во время обработки, попадут
+	--// в следующий проход и не потеряются.
+	local Batch = table.move(Queue, 1, Count, 1, {})
+	table.clear(Queue)
+
+	local MaxPerFrame = self.MaxLogsPerFrame or 4
+	local FrameDelay = self.LogFrameDelay or 0.05
+
+	for Index = 1, #Batch do
+		self:CreateLog(Batch[Index])
+
+		--// Отдаём кадр: флуд от спам-ремоута не должен подвешивать
+		--// ни UI, ни игру.
+		if Index % MaxPerFrame == 0 and Index < #Batch then
+			task.wait(FrameDelay)
+		end
+	end
 end
 
 function Ui:BeginLogService()
@@ -1679,7 +1698,7 @@ function Ui:CreateLog(Data: Log)
 	--// Deserialize arguments
 	Args = Communication:DeserializeTable(Args)
 
-	--// Deep clone data
+	--// Deep clone data (единственный клон на лог)
 	local ClonedArgs = Process:DeepCloneTable(Args)
 	Data.Args = ClonedArgs
 	Data.ValueSwaps = Generation:MakeValueSwapsTable(Timestamp)

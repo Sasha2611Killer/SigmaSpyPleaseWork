@@ -243,7 +243,9 @@ end
 --// РЕШЕНИЕ (принцип Cobalt): fire откладывается до конца кадра.
 --// Сам вызов ремоута уходит СРАЗУ, UI получает пачку один раз за кадр.
 --// Плюс: спамный ремоут виден ПОЛНОСТЬЮ (как в Cobalt) — бюджет не нужен.
-local BATCH_REMOTE_DATA = true
+--// Батчинг перенесён в Process.new.lua (очередь логов + воркер) —
+--// здесь он не нужен и выключен, чтобы не дублировать.
+local BATCH_REMOTE_DATA = false
 
 local RemoteDataQueue = {}
 local RemoteDataCount = 0

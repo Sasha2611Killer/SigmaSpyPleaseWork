@@ -107,109 +107,6 @@ local InstanceCreatedRemotes: typeof(setmetatable({} :: {[Event]: true}, {__mode
     __mode = "k"
 })
 
---// =====================================================================
---// Cobalt-style: ОЧЕРЕДЬ ЛОГОВ + ВОРКЕР (Src/Utils/Log.luau)
---// =====================================================================
---// Раньше на треде вызова ремоута делалось:
---//   1) разбор стека (16 уровней × getfenv)      <- тяжело
---//   2) копирование аргументов
---//   3) РЕАЛЬНЫЙ ВЫЗОВ РЕМОУТА                     <- отправка ЗДЕСЬ
---//   4) Communication:QueueLog(...)                 <- сериализация + UI, синхронно
---//
---// Из-за этого спам-ремоут (100+ вызовов/сек) задерживал отправку
---// остальных ремоутов: до реального FireServer стоял разбор стека,
---// а после него — тяжёлый QueueLog, блокирующий следующий вызов.
---//
---// Теперь:
---//   1) дёшево снимаем вызывающие функции (только debug.info)
---//   2) быстрый клон аргументов (фиксируем значения ДО отправки)
---//   3) РЕАЛЬНЫЙ ВЫЗОВ — СРАЗУ
---//   4) разбор стека + логирование — в воркере, сброс раз в кадр
-local LogQueue = {}
-local LogQueueTail = 0
-local LogWorkerStarted = false
-
---// =====================================================================
---// ДИАГНОСТИКА (включается из консоли executor'а, без правки файла)
---// =====================================================================
---// getgenv().SIGMA_NO_LOG = true
---//   → логирование выключено полностью (только сам вызов ремоута).
---//   Если задержка НЕ исчезла — виноват не лог-пайплайн.
---
---// getgenv().SIGMA_DEBUG = true
---//   → печатает медленные вызовы (> 50 мс) с разбором времени.
---
---// getgenv().SIGMA_MAX_LOGS = 30
---//   → жёсткий лимит захвата (0 = без ограничений).
-local Genv = (getgenv and getgenv()) or nil
-
-local DebugMode = false
-local NoLogMode = false
-local SlowCallThreshold = 50
-local MaxCapturePerSecond = 0
-
-local CaptureBudget = {}
-local CaptureBudgetCount = 0
-
-local function RefreshDiagnosticFlags()
-    if not Genv then return end
-
-    DebugMode = Genv.SIGMA_DEBUG == true
-    NoLogMode = Genv.SIGMA_NO_LOG == true
-
-    local Limit = tonumber(Genv.SIGMA_MAX_LOGS)
-    if Limit then
-        MaxCapturePerSecond = Limit
-    end
-end
-
---// Бюджет захвата: ограничивает количество ТЯЖЁЛЫХ вызовов в секунду.
---// 0 = без ограничений (по умолчанию).
-local function AllowCapture(Remote: Instance): boolean
-    if MaxCapturePerSecond <= 0 then return true end
-
-    local Now = os.clock()
-    local Entry = CaptureBudget[Remote]
-
-    if not Entry then
-        CaptureBudget[Remote] = { Count = 1, WindowStart = Now }
-        CaptureBudgetCount += 1
-        return true
-    end
-
-    if Now - Entry.WindowStart >= 1 then
-        Entry.WindowStart = Now
-        Entry.Count = 1
-        return true
-    end
-
-    Entry.Count += 1
-    return Entry.Count <= MaxCapturePerSecond
-end
-
---// =====================================================================
---// КЭШИ (Cobalt: DebugId/скрипты резолвятся ОДИН раз, а не на каждый вызов)
---// =====================================================================
---// Per-remote: DebugId + ClassData (за жизнь ремоута не меняются)
-local RemoteMetaCache = setmetatable({}, {__mode = "k"})
-
---// Per-function: Function → Script (weak)
-local ScriptCache = setmetatable({}, {__mode = "k"})
-
---// game:GetDescendants() — дорогой вызов (тысячи инстансов).
---// Кэшируем на 5 секунд.
-local DescendantsCache: { any }? = nil
-local DescendantsCacheTime = 0
-
-local function GetDescendantsCached(): { any }
-    local Now = os.clock()
-    if not DescendantsCache or (Now - DescendantsCacheTime) > 5 then
-        DescendantsCache = game:GetDescendants()
-        DescendantsCacheTime = Now
-    end
-    return DescendantsCache
-end
-
 function Process:Merge(Base: table, New: table)
     if not New then return end
 	for Key, Value in next, New do
@@ -230,56 +127,6 @@ function Process:Init(Data)
     Hook = Modules.Hook
     Communication = Modules.Communication
     ReturnSpoofs = Modules.ReturnSpoofs
-
-	--// Воркер очереди логов (Cobalt: Heartbeat + LogNotificationQueue)
-	if not LogWorkerStarted then
-		LogWorkerStarted = true
-		task.spawn(function()
-			while true do
-				task.wait()
-
-				local Ok, Error = pcall(function()
-					Process:RefreshDiagnostics()
-					Process:FlushLogQueue()
-				end)
-
-				if not Ok then
-					warn("Cobalt/Sigma: log queue flush failed:", Error)
-				end
-			end
-		end)
-	end
-end
-
---// Сброс очереди логов. Вызывается воркером раз в кадр.
-function Process:FlushLogQueue()
-	if LogQueueTail == 0 then return end
-
-	local Batch = LogQueue
-	local Count = LogQueueTail
-	LogQueue = {}
-	LogQueueTail = 0
-
-	for Index = 1, Count do
-		local Entry = Batch[Index]
-		Batch[Index] = nil
-
-		if Entry then
-			local Data = Entry.Data
-
-			--// Разбор стека — здесь, в воркере (функции уже захвачены)
-			if Entry.Functions then
-				self:ResolveCallers(Data, Entry.Functions)
-			end
-
-			Communication:QueueLog(Data)
-		end
-	end
-end
-
---// Обновление диагностических флагов (раз в кадр, дёшево)
-function Process:RefreshDiagnostics()
-    RefreshDiagnosticFlags()
 end
 
 --// Communication
@@ -326,9 +173,7 @@ end
 
 function Process:CheckValue(Value, Ignore: table?, Cache: table?)
     local Type = typeof(Value)
-
-    --// [FIX] Убран вызов Communication:WaitCheck() — он был yield'ом
-    --// на КАЖДОЕ значение (см. Communication.new.lua).
+    Communication:WaitCheck()
 
     if Type == "table" then
         Value = self:DeepCloneTable(Value, Ignore, Cache)
@@ -365,49 +210,6 @@ function Process:DeepCloneTable(Table, Ignore: table?, Visited: table?): table
     end
 
     return New
-end
-
---// =====================================================================
---// БЫСТРЫЙ КЛОН АРГУМЕНТОВ (горячий путь)
---// =====================================================================
---// Arguments надо зафиксировать ДО отправки (иначе игра успеет их
---// изменить после вызова). Но DeepCloneTable слишком тяжёлый: он зовёт
---// Communication:WaitCheck() на КАЖДОЕ значение. Здесь — лёгкий клон
---// без WaitCheck/cloneref: только структура таблиц, Instances по ссылке.
-function Process:CloneValueFast(Value: any, Cache: table?): any
-    if type(Value) ~= "table" then return Value end
-
-    local New = {}
-    Cache = Cache or {}
-
-    if Cache[Value] then
-        return Cache[Value]
-    end
-    Cache[Value] = New
-
-    for Key, Item in next, Value do
-        New[Key] = self:CloneValueFast(Item, Cache)
-    end
-
-    return New
-end
-
-function Process:CloneArgs(...)
-    local Packed = table.pack(...)
-    local Result = table.create(Packed.n)
-
-    for Index = 1, Packed.n do
-        Result[Index] = self:CloneValueFast(Packed[Index])
-    end
-
-    return Result
-end
-
---// Публичный быстрый клон таблицы (для UI).
---// В отличие от DeepCloneTable не зовёт Communication:WaitCheck()
---// на каждое значение — тот вызов на спаме тормозил UI.
-function Process:CloneTableFast(Table: any): any
-    return self:CloneValueFast(Table)
 end
 
 --// Глубокое сравнение для дедупликации логов (Detect Spam).
@@ -524,8 +326,8 @@ function Process:RemoteAllowed(Remote: Event, TransferType: string, Method: stri
 	if not ClassData then return end
 
     --// Check if the transfer type has data
-    local Allowed = ClassData[TransferType]
-    if not Allowed then return end
+	local Allowed = ClassData[TransferType]
+	if not Allowed then return end
 
     --// Check if the method is allowed
 	if Method then
@@ -560,16 +362,13 @@ function Process:SetNewReturnSpoofs(NewReturnSpoofs: table)
     ReturnSpoofs = NewReturnSpoofs
 end
 
---// =====================================================================
---// РАЗБОР ВЫЗЫВАЮЩИХ (перенесён с горячего пути в воркер)
---// =====================================================================
 --// [FIX] ВСЕ не-Sigma Lua-фреймы + script-хинты с C-фреймов.
 --// Probe v6 (2026-11-03): стек на Delta ДОСТУПЕН. C-фреймы имеют l == -1,
 --// но это НЕ конец стека — идём, пока debug.info(Level,"f") не nil.
 --// C-фреймы в Result не добавляем, но их env.script (владелец потока/
 --// загрузчик) собираем в Hints. identity 8 поднимается ЛЕНИВО — только
 --// если getfenv упал. Страховка на executor'ы без identity-функций.
-function Process:ResolveClosures(Functions: { any }): (table, table)
+function Process:FindCallingClosures(_Offset: number?): (table, table)
     local Getfenv = Hook:GetOriginalFunc(getfenv)
     local Result = {}
     local Hints = {}
@@ -586,7 +385,10 @@ function Process:ResolveClosures(Functions: { any }): (table, table)
         setthreadidentity(8)
     end
 
-    for _, Function in Functions do
+    for Level = 1, 16 do
+        local Function = debug.info(Level, "f")
+        if not Function then break end
+
         if Seen[Function] then continue end
         Seen[Function] = true
 
@@ -625,76 +427,7 @@ function Process:ResolveClosures(Functions: { any }): (table, table)
     return Result, Hints
 end
 
---// Дёшево снимает список вызывающих функций (только debug.info).
---// Вызывается НА ГОРЯЧЕМ ПУТИ, до реального вызова ремоута:
---// стек здесь ещё живой, а getfenv/скрипты — уже нет.
---// ВАЖНО: диапазон уровней 1..16 — как в оригинальной FindCallingClosures
---// (там Offset был помечен "_" и игнорировался). Не сужать диапазон,
---// иначе изменится атрибуция SourceScript/CallerScript.
-function Process:GetCallingFunctions(Offset: number?): { any }
-    local Functions = {}
-    local Seen = {}
-
-    for Level = 1, 16 do
-        local Function = debug.info(Level, "f")
-        if not Function then break end
-        if Seen[Function] then continue end
-        Seen[Function] = true
-
-        table.insert(Functions, Function)
-    end
-
-    return Functions
-end
-
---// Разбор вызывающих — уже в воркере (функции захвачены заранее).
-function Process:ResolveCallers(Data: RemoteData, Functions: { any })
-    --// Fallback: если стек пуст — getcallingscript() (владелец потока)
-    if not Data.SourceScript then
-        Data.SourceScript = Data.CallingScript
-    end
-
-    local Closures, Hints = self:ResolveClosures(Functions)
-
-    local SourceIndex = nil
-    for i, F in Closures do
-        local S = self:GetScriptFromFunc(F)
-        if typeof(S) == "Instance" then
-            Data.CallingFunction = F
-            Data.SourceScript = S
-            SourceIndex = i
-            break
-        end
-    end
-
-    if not SourceIndex then return end
-
-    --// 1) хинты (C-фреймы: владелец потока/загрузчик)
-    for _, Hint in Hints do
-        if typeof(Hint) == "Instance" and Hint ~= Data.SourceScript then
-            Data.CallerScript = Hint
-            break
-        end
-    end
-
-    --// 2) fallback: скрипт следующего Lua-фрейма
-    if not Data.CallerScript then
-        for i = SourceIndex + 1, #Closures do
-            local S = self:GetScriptFromFunc(Closures[i])
-            if typeof(S) == "Instance" and S ~= Data.SourceScript then
-                Data.CallerFunction = Closures[i]
-                Data.CallerScript = S
-                break
-            end
-        end
-    end
-end
-
 --// Обратная совместимость: первый (ближайший) вызывающий closure
-function Process:FindCallingClosures(Offset: number?): (table, table)
-    return self:ResolveClosures(self:GetCallingFunctions(Offset))
-end
-
 function Process:FindCallingLClosure(Offset: number)
     return self:FindCallingClosures(Offset)[1]
 end
@@ -722,7 +455,7 @@ function Process:Decompile(Script: LocalScript | ModuleScript): string
         Body = Bytecode,
         Method = "POST",
         Headers = {
-            ["Content-Type"] = "application/json"
+            ["Content-Type"] = "text/plain"
         },
     })
 
@@ -742,20 +475,6 @@ end
 function Process:GetScriptFromFunc(Func: (...any) -> ...any)
     if not Func then return end
 
-    --// Кэш: скрипт функции не меняется. false = "не нашли".
-    local Cached = ScriptCache[Func]
-    if Cached ~= nil then
-        if Cached == false then return end
-        return Cached
-    end
-
-    local Result = self:ResolveScriptFromFunc(Func)
-    ScriptCache[Func] = Result or false
-
-    return Result
-end
-
-function Process:ResolveScriptFromFunc(Func: (...any) -> ...any)
     local Success, ENV = pcall(getfenv, Func)
     if Success then
         if not self:IsSigmaSpyENV(ENV) then
@@ -772,8 +491,7 @@ function Process:ResolveScriptFromFunc(Func: (...any) -> ...any)
     if SourceOk and type(Source) == "string" and Source ~= "[C]" and #Source > 0 then
         local TargetName = Source:match("[%w_]+$")
         if TargetName then
-            --// Кэш потомков (game:GetDescendants() — тысячи инстансов)
-            local Candidates = {GetDescendantsCached()}
+            local Candidates = {game:GetDescendants()}
             if typeof(getloadedmodules) == "function" then
                 table.insert(Candidates, getloadedmodules())
             end
@@ -940,36 +658,15 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
 
 	if TransferType and not self:RemoteAllowed(Remote, TransferType, Method) then return end
 
-    --// ------------------------------------------------------------------
-    --// ДИАГНОСТИЧЕСКИЙ РЕЖИМ: логирование выключено, только сам вызов.
-    --// Если задержка не исчезла — виноват НЕ лог-пайплайн.
-    --// ------------------------------------------------------------------
-    if NoLogMode then
-        return ProcessCallback(Data, Remote, ...)
-    end
-
-    local StartClock = os.clock()
-
-    --// Id + ClassData — кэшируем (не меняются за жизнь ремоута)
     local Id
-    local ClassData
-    do
-        local Cached = RemoteMetaCache[Remote]
-        if Cached then
-            Id = Cached.Id
-            ClassData = Cached.ClassData
-        else
-            local identity = getthreadidentity()
-            setthreadidentity(8)
-            local OkDid, Did = pcall(Remote.GetDebugId, Remote)
-            setthreadidentity(identity)
-            Id = (OkDid and Did) or tostring(Remote):sub(-12)
-            ClassData = self:GetClassData(Remote)
-
-            RemoteMetaCache[Remote] = { Id = Id, ClassData = ClassData }
-        end
-    end
-
+	do
+		local identity = getthreadidentity()
+		setthreadidentity(8)
+		local OkDid, Did = pcall(Remote.GetDebugId, Remote)
+		setthreadidentity(identity)
+		Id = (OkDid and Did) or tostring(Remote):sub(-12)
+	end
+    local ClassData = self:GetClassData(Remote)
     local Timestamp = tick()
 
     if IsReceive then
@@ -979,59 +676,74 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         end
     end
 
-    --// ------------------------------------------------------------------
-    --// ГОРЯЧИЙ ПУТЬ. Здесь допустимо только ДЁШЕВОЕ.
-    --// ------------------------------------------------------------------
-
-    --// 1) Снимаем вызывающие функции (только debug.info — стек ещё живой).
-    --//    Разбор env/скриптов делается позже, в воркере.
-    local CallingFunctions = self:GetCallingFunctions(6)
-
-    --// 2) Фиксируем аргументы ДО отправки (иначе игра успеет их изменить)
-    local Args = self:CloneArgs(...)
+    local CallingFunction
+    local SourceScript
+    local CallerScript = nil
+    local CallerFunction = nil
 
     local ExtraData = self.ExtraData
     if ExtraData then
         self:Merge(Data, ExtraData)
     end
 
+    --// SourceScript = первый Lua-фрейм с валидным Instance (ClientCore).
+    --// CallerScript = первый хинт/скрипт, отличный от SourceScript
+    --// (C-фрейм на Delta несёт env.script загрузчика = Framework).
+    if not IsReceive then
+        local Closures, Hints = self:FindCallingClosures(6)
+
+        local SourceIndex = nil
+        for i, F in Closures do
+            local S = self:GetScriptFromFunc(F)
+            if typeof(S) == "Instance" then
+                CallingFunction = F
+                SourceScript = S
+                SourceIndex = i
+                break
+            end
+        end
+
+        if SourceIndex then
+            --// 1) хинты (C-фреймы: владелец потока/загрузчик)
+            for _, Hint in Hints do
+                if typeof(Hint) == "Instance" and Hint ~= SourceScript then
+                    CallerScript = Hint
+                    break
+                end
+            end
+
+            --// 2) fallback: скрипт следующего Lua-фрейма
+            if not CallerScript then
+                for i = SourceIndex + 1, #Closures do
+                    local S = self:GetScriptFromFunc(Closures[i])
+                    if typeof(S) == "Instance" and S ~= SourceScript then
+                        CallerFunction = Closures[i]
+                        CallerScript = S
+                        break
+                    end
+                end
+            end
+        end
+    end
+
     local CallingScript = getcallingscript()
     self:Merge(Data, {
         Remote = cloneref(Remote),
 		CallingScript = CallingScript,
-        --// CallingFunction/SourceScript/CallerScript — заполняются
-        --// в воркере (ResolveCallers), после реального вызова.
-        CallingFunction = nil,
-        SourceScript = nil,
-        CallerScript = nil,
+        CallingFunction = CallingFunction,
+        --// Fallback: если стек пуст — getcallingscript() (владелец потока)
+        SourceScript = SourceScript or CallingScript,
+        CallerScript = CallerScript,
         Id = Id,
 		ClassData = ClassData,
         Timestamp = Timestamp,
-        Args = Args
+        Args = {...}
     })
 
-    --// 3) РЕАЛЬНЫЙ ВЫЗОВ РЕМОУТА — СРАЗУ.
-    --//    Ни разбора стека, ни сериализации до него: спам-ремоут
-    --//    не должен задерживать отправку остальных.
     local ReturnValues = ProcessCallback(Data, Remote, ...)
     Data.ReturnValues = ReturnValues
 
-    --// 4) Логирование — в очередь. Разбор стека + сериализация + UI
-    --//    выполняются в воркере (Process:FlushLogQueue), раз в кадр.
-    if AllowCapture(Remote) then
-        LogQueueTail += 1
-        LogQueue[LogQueueTail] = {
-            Data = Data,
-            Functions = CallingFunctions,
-        }
-    end
-
-    if DebugMode then
-        local Elapsed = (os.clock() - StartClock) * 1000
-        if Elapsed > SlowCallThreshold then
-            print(string.format("[Sigma] slow %s: %.1f ms", tostring(Method), Elapsed))
-        end
-    end
+    Communication:QueueLog(Data)
 
     return ReturnValues
 end

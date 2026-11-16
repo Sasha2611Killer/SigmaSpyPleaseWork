@@ -254,12 +254,19 @@ end
 
 function Files:MakeActorScript(Scripts, ChannelId: number): string
 	local ActorCode = Files:CompileModule(Scripts)
+
 	ActorCode ..= [[
+	local CurrentActor = select(2, ...)
 	local ExtraData = {
-		IsActor = true
+		IsActor = true,
+		Actor = typeof(CurrentActor) == "Instance" and CurrentActor or nil,
 	}
 	]]
-	ActorCode ..= `Libraries.Hook:BeginService(Libraries, ExtraData, {ChannelId})`
+
+	--// пробрасывает (ChannelId, Actor) из run_on_actor,
+	--// а не таблицу. BeginService сам разберёт varargs как надо.
+	ActorCode ..= `Libraries.Hook:BeginService(Libraries, ExtraData, ...)`
+
 	return ActorCode
 end
 

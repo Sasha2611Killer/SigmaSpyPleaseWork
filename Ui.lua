@@ -39,10 +39,8 @@ local Ui = {
 		"CallingScript",
 		"CallerScript",
 		"IsActor",
-		"Actor",
 		"ScriptHash",
-		"Id",
-		"InvokeKind",   --// <-- добавить
+		"Id"
 	},
 
     Window = nil,
@@ -1791,10 +1789,6 @@ function Ui:CreateLog(Data: Log)
 			end
 		end
 	end
-
-	if Data.InvokeResult and Data.IsReceive and Data.InvokeKind == "Request" then
-		Data.Args = Data.InvokeResult
-	end			
 
 	--// Fetch HeaderData by the RemoteID used for stacking
 	local Header = self:GetRemoteHeader(Data)

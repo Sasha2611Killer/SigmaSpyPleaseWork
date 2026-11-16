@@ -785,9 +785,21 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
             end
         end
     else
-        --// [FIX] Receive: достаём скрипт из кэша соединений
-        local Connection = Data.Connection -- если Hook передаёт
-        CallerScript = self:GetConnectionScript(Remote, Connection)
+        --// [FIX] Receive: скрипт из существующих соединений
+        local ClassData = self:GetClassData(Remote)
+        if ClassData then
+            local Signal = Hook:Index(Remote, ClassData.Receive[1])
+            local Connections = self:FilterConnections(Signal)
+            for _, Conn in Connections do
+                if Conn.Function then
+                    local S = self:GetScriptFromFunc(Conn.Function)
+                    if typeof(S) == "Instance" then
+                        CallerScript = S
+                        break
+                    end
+                end
+            end
+        end
     end
 
     local CallingScript = getcallingscript()

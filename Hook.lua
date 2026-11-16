@@ -318,8 +318,9 @@ end
 function Hook:HookRemoteIndexes()
 	local RemoteClassData = Process.RemoteClassData
 	for ClassName, Data in RemoteClassData do
-		local FuncName = Data.Send[1]
-		self:HookRemoteTypeIndex(ClassName, FuncName)
+		for _, FuncName in Data.Send do
+			self:HookRemoteTypeIndex(ClassName, FuncName)
+		end
 	end
 end
 
@@ -509,11 +510,9 @@ function Hook:ConnectClientRecive(Remote)
 	--// Connect remote
 	if not IsRemoteFunction then
         local Connection = Remote[Method]:Connect(Callback)
-        --// [FIX] Запоминаем, какой скрипт создал соединение
+        --// Сохраняем соединение для возможного использования
         Process:RememberConnection(Remote, Connection, getcallingscript())
-	else -- Remote functions
-		--// [ANTI-DETECT] Детур OnClientInvoke требует hookfunction на
-		--// игровой колбэк — детектится. В стелс-режиме пропускаем.
+	else
 		if Configuration and Configuration.StealthReceive then return end
 		self:HookClientInvoke(Remote, Method, Callback)
 	end

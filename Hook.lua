@@ -500,23 +500,9 @@ function Hook:BypassAdonis()
 end				
 
 function Hook:BeginHooks()
-	--// [FIX] Идемпотентность: actor-код теперь ставит хуки сам, а
-	--// "BeginHooks" из главного VM может прийти позже. Повторной
-	--// установки быть не должно (иначе двойные логи).
 	if self.HooksStarted then return end
 	self.HooksStarted = true
 
-	--// Два режима, переключаются Configuration.UseOthHooks:
-	--// true  — oth (отдельный тред): детекторам не виден, но обход
-	--//         стека не видит игру → обе кнопки Decompile показывают
-	--//         один скрипт (fallback getcallingscript).
-	--// false — ПРЯМАЯ ЗАПИСЬ __namecall: обработчик на игровом треде,
-	--//         полная атрибуция (SourceScript/CallerScript различаются).
-	--//         Детекты Adonis нейтрализует BypassAdonis.
-	--// Оба режима распаковывают результат (Unpack) — без этого игра
-	--// получает таблицу вместо значений (зависание камеры).
-	--// В actor-VM всегда прямая запись __namecall: oth-тред в акторе
-	--// некорректно тащит identity и ломает атрибуцию вызовов.
 	local InActor = Process ~= nil and Process.ExtraData ~= nil
 		and Process.ExtraData.IsActor == true
 
@@ -535,7 +521,6 @@ function Hook:BeginHooks()
 				return OthOriginal(self, ...)
 			end
 
-			--// Сырой хук: распаковываем сами
 			local ReturnValues = CallNamecall(OthOriginal, self, Method, ...)
 			if ReturnValues then
 				return Process:Unpack(ReturnValues)
@@ -545,31 +530,28 @@ function Hook:BeginHooks()
 		end)
 		OriginalNameCall = OthOriginal
 	else
-		OriginalNameCall = self:ReplaceMetaMethod(game, "__namecall", function(self, ...)
+		local RawOriginal
+		RawOriginal = hookmetamethod(game, "__namecall", function(self, ...)
 			local Method = getnamecallmethod()
 
-			--// [FIX] Здесь БЫЛ print(self:GetFullName()) — GetFullName это
-			--// тоже namecall, он снова попадал в этот хук -> рекурсия
-			--// без дна -> C stack overflow -> вылет игры. Никаких
-			--// методов/GetFullName/tostring инстансов в namecall-хуке.
-			--
-			--// Не наш вызов -> возвращаем nil: HookMiddle сам вызовет
-			--// оригинал РОВНО ОДИН РАЗ и распакует результат. Если вернуть
-			--// сюда результат оригинала, HookMiddle распакует его повторно
-			--// (таблица -> "multiple returns", nil -> вызов дважды).
-			if not IsHookedSend(self, Method) then return end
+			if not IsHookedSend(self, Method) then
+				return RawOriginal(self, ...)
+			end
 
-			return CallNamecall(OriginalNameCall, self, Method, ...)
+			local ReturnValues = CallNamecall(RawOriginal, self, Method, ...)
+			if ReturnValues then
+				return Process:Unpack(ReturnValues)
+			end
+
+			return RawOriginal(self, ...)
 		end)
+		OriginalNameCall = RawOriginal
 	end
 
 	Merge(self, {
 		OriginalNamecall = OriginalNameCall,
 	})
 
-	--// [FIX] Хуки через __index (BindableEvent.Fire, RemoteFunction.InvokeServer,
-	--// local fire = event.Fire; fire(event, ...)). На некоторых экзекьюторах
-	--// __namecall не перехватывает часть таких вызовов — Cobalt хукает оба пути.
 	pcall(self.HookRemoteIndexes, self)
 end
 --// Скрытие функции из стека (Cobalt делает так для детуров).

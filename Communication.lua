@@ -396,10 +396,26 @@ end
 
 function Module:Communicate(...)
     local Fire = self:ChannelIndex(Channel, "Fire")
+
+    --// [FIX] В actor-VM (и на экзекьюторах без identity-функций)
+    --// getthreadidentity/setthreadidentity могут отсутствовать. Раньше
+    --// это молча роняло каждое сообщение актора (pcall в ProcessQueue
+    --// глотал ошибку) — логи актора не доходили до UI.
+    local HasIdentity = typeof(getthreadidentity) == "function"
+        and typeof(setthreadidentity) == "function"
+
+    if not HasIdentity then
+        Fire(Channel, ...)
+        return
+    end
+
     local identity = getthreadidentity()
     setthreadidentity(8)
-    Fire(Channel, ...)
+    local Ok, Error = pcall(Fire, Channel, ...)
     setthreadidentity(identity)
+
+    --// identity восстановлен в любом случае; ошибку не глотаем
+    if not Ok then error(Error, 0) end
 end
 
 function Module:AddConnection(Callback): RBXScriptConnection

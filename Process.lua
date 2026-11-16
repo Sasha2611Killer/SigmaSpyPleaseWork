@@ -86,6 +86,8 @@ local Process = {
     }
 }
 
+local ConnectionScripts = setmetatable({}, {__mode = "k"})
+
 --// Modules
 local Hook
 local Communication
@@ -182,6 +184,39 @@ function Process:CheckValue(Value, Ignore: table?, Cache: table?)
     end
 
     return Value
+end
+
+function Process:RememberConnection(Remote: Instance, Connection: RBXScriptConnection, Script: Instance?)
+    if not Script then
+        Script = getcallingscript()
+    end
+    if typeof(Script) ~= "Instance" then return end
+
+    local RemoteCache = ConnectionScripts[Remote]
+    if not RemoteCache then
+        RemoteCache = setmetatable({}, {__mode = "k"})
+        ConnectionScripts[Remote] = RemoteCache
+    end
+
+    RemoteCache[Connection] = Script
+end
+
+--// Достаём скрипт для сработавшего соединения
+function Process:GetConnectionScript(Remote: Instance, Connection: RBXScriptConnection?): Instance?
+    local RemoteCache = ConnectionScripts[Remote]
+    if not RemoteCache then return nil end
+
+    --// Если соединение известно — сразу отдаём
+    if Connection and RemoteCache[Connection] then
+        return RemoteCache[Connection]
+    end
+
+    --// Иначе первый попавшийся (обычно их мало на один Remote)
+    for _, Script in next, RemoteCache do
+        return Script
+    end
+
+    return nil
 end
 
 function Process:DeepCloneTable(Table, Ignore: table?, Visited: table?): table
@@ -701,9 +736,14 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     local CallerScript = nil
     local CallerFunction = nil
 
-    local ExtraData = self.ExtraData
+   local ExtraData = self.ExtraData
     if ExtraData then
         self:Merge(Data, ExtraData)
+        --// [FIX] Пробрасываем IsActor явно, если его нет в Data
+        if Data.IsActor == nil and ExtraData.IsActor then
+            Data.IsActor = true
+            Data.Actor = ExtraData.Actor
+        end
     end
 
     --// SourceScript = первый Lua-фрейм с валидным Instance (ClientCore).
@@ -744,6 +784,10 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
                 end
             end
         end
+    else
+        --// [FIX] Receive: достаём скрипт из кэша соединений
+        local Connection = Data.Connection -- если Hook передаёт
+        CallerScript = self:GetConnectionScript(Remote, Connection)
     end
 
     local CallingScript = getcallingscript()

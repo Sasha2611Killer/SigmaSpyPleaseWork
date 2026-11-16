@@ -253,18 +253,31 @@ function Files:CompileModule(Scripts): string
 end
 
 function Files:MakeActorScript(Scripts, ChannelId: number): string
-	local ActorCode = Files:CompileModule(Scripts)
+	local ActorCode = self:CompileModule(Scripts)
 
 	ActorCode ..= [[
+	--// Actor иногда не передаётся в varargs (run_on_thread) — пробуем
+	--// get_current_actor, чтобы в логе был реальный Actor, а не nil.
 	local CurrentActor = select(2, ...)
+	if typeof(CurrentActor) ~= "Instance"
+		and typeof(get_current_actor) == "function"
+	then
+		local Ok, Resolved = pcall(get_current_actor)
+		if Ok and typeof(Resolved) == "Instance" then
+			CurrentActor = Resolved
+		end
+	end
+
 	local ExtraData = {
 		IsActor = true,
 		Actor = typeof(CurrentActor) == "Instance" and CurrentActor or nil,
 	}
 	]]
 
-	ActorCode ..= `Libraries.Hook:BeginService(Libraries, ExtraData, ...)\n`
-	ActorCode ..= `Libraries.Hook:LoadReceiveHooks()`  -- <-- ДОБАВИТЬ
+	ActorCode ..= [[
+	Libraries.Hook:BeginService(Libraries, ExtraData, ...)
+	Libraries.Hook:BeginHooks()
+	]]
 
 	return ActorCode
 end

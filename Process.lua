@@ -53,7 +53,8 @@ local Process = {
             }
         },
         ["BindableEvent"] = {
-            NoReciveHook = true,
+            --// [FIX] Раньше NoReciveHook = true полностью запрещал входящие
+            --// BindableEvent.Event. Cobalt их хукает — теперь тоже.
             Send = {
                 "Fire",
 				"fire",
@@ -64,7 +65,7 @@ local Process = {
         },
         ["BindableFunction"] = {
             IsRemoteFunction = true,
-            NoReciveHook = true,
+            --// OnInvoke тоже должен логироваться (было запрещено)
             Send = {
                 "Invoke",
 				"invoke",
@@ -79,6 +80,8 @@ local Process = {
 
     --// Функции-логгеры Sigma Spy (не показывать в списке соединений)
     LogConnectionFunctions = setmetatable({}, {__mode = "k"}),
+    --// remote -> скрипт, назначивший OnClientInvoke/OnInvoke
+    CallbackScripts = setmetatable({}, {__mode = "k"}),
     ConfigOverwrites = {
         [{"sirhurt", "potassium", "wave"}] = {
             ForceUseCustomComm = true
@@ -129,6 +132,24 @@ function Process:Init(Data)
     Hook = Modules.Hook
     Communication = Modules.Communication
     ReturnSpoofs = Modules.ReturnSpoofs
+
+    self:BuildRemoteLookups()
+end
+
+--// [FIX] Быстрый lookup для __namecall-хука: какие методы вообще являются
+--// отправкой. Строится из RemoteClassData, чтобы не дублировать список.
+function Process:BuildRemoteLookups()
+    local Lookup = {}
+
+    for ClassName, Data in next, self.RemoteClassData do
+        local Methods = {}
+        for _, Method in next, Data.Send or {} do
+            Methods[Method] = true
+        end
+        Lookup[ClassName] = Methods
+    end
+
+    self.RemoteSendLookup = Lookup
 end
 
 --// Communication
@@ -344,8 +365,16 @@ function Process:GetClassData(Remote: Instance): table?
 end
 
 function Process:IsProtectedRemote(Remote: Instance): boolean
-    local IsDebug = Remote == Communication.DebugIdRemote
-    local IsChannel = Remote == (WrappedChannel and Channel.Channel or Channel)
+    if typeof(Remote) ~= "Instance" then return false end
+
+    local IsDebug = Communication ~= nil and Communication.DebugIdRemote == Remote
+
+    local ActiveChannel = Channel
+    if WrappedChannel and typeof(ActiveChannel) == "table" then
+        ActiveChannel = ActiveChannel.Channel
+    end
+
+    local IsChannel = ActiveChannel ~= nil and ActiveChannel == Remote
 
     return IsDebug or IsChannel
 end
@@ -576,6 +605,108 @@ function Process:GetScriptFromFunc(Func: (...any) -> ...any)
     return
 end
 
+--// [FIX] Receive-атрибуция: какой скрипт владеет конкретным соединением.
+--// Connection.Thread — самый надёжный путь; Function/env — fallback.
+function Process:GetScriptFromConnection(Connection: table): Instance?
+    if typeof(Connection) ~= "table" then return nil end
+
+    if typeof(Connection.Script) == "Instance" then
+        return Connection.Script
+    end
+
+    local Thread = Connection.Thread
+    if Thread and typeof(getscriptfromthread) == "function" then
+        local Ok, Script = pcall(getscriptfromthread, Thread)
+        if Ok and typeof(Script) == "Instance" then
+            return Script
+        end
+    end
+
+    local Function = Connection.Function
+    if typeof(Function) == "function" then
+        return self:GetScriptFromFunc(Function)
+    end
+
+    return nil
+end
+
+--// Скрипт внутри Actor? (LocalScript внутри Actor'а)
+function Process:GetActorFromScript(Script: Instance): Instance?
+    if typeof(Script) ~= "Instance" then return nil end
+
+    local Ok, Actor = pcall(function()
+        return Script:FindFirstAncestorOfClass("Actor")
+    end)
+
+    if Ok and typeof(Actor) == "Instance" then
+        return Actor
+    end
+
+    return nil
+end
+
+--// [FIX] Определяем Actor по скрипту-источнику. Это нужно, когда вызов
+--// из actor-VM поймал общий oth-хук главного VM (там ExtraData = nil,
+--// и без этой проверки в логе всегда было IsActor = false).
+function Process:ResolveActor(CallingScript, SourceScript, CallerScript, CallingFunction): Instance?
+    for _, Script in {CallingScript, SourceScript, CallerScript} do
+        local Actor = self:GetActorFromScript(Script)
+        if Actor then return Actor end
+    end
+
+    if typeof(CallingFunction) == "function" then
+        local Script = self:GetScriptFromFunc(CallingFunction)
+        local Actor = self:GetActorFromScript(Script)
+        if Actor then return Actor end
+    end
+
+    if typeof(get_current_actor) == "function" then
+        local Ok, Actor = pcall(get_current_actor)
+        if Ok and typeof(Actor) == "Instance" then
+            return Actor
+        end
+    end
+
+    return nil
+end
+
+--// [FIX] BindableEvent между actor-VM и main-VM НЕ умеет передавать
+--// функции и таблицы с метатаблицами (Cobalt конвертирует их в метаданные
+--// вручную). Без этого весь actor-лог падал на Fire и не доходил до UI —
+--// отсюда "isActor не пишет" и пропавшие actor-вызовы.
+function Process:MakeChannelSafe(Value, Seen)
+    local ValueType = typeof(Value)
+
+    if ValueType == "function" then
+        local Ok, Name = pcall(debug.info, Value, "n")
+        if Ok and type(Name) == "string" and #Name > 0 then
+            return `[function {Name}]`
+        end
+        return "[function]"
+    elseif ValueType == "thread" then
+        return "[thread]"
+    elseif ValueType ~= "table" then
+        if ValueType == "userdata" then
+            local Ok, Text = pcall(tostring, Value)
+            return Ok and Text or "[userdata]"
+        end
+        return Value
+    end
+
+    local Cache = Seen or {}
+    local Existing = Cache[Value]
+    if Existing then return Existing end
+
+    local Copy = {}
+    Cache[Value] = Copy
+
+    for Key, Item in next, Value do
+        Copy[self:MakeChannelSafe(Key, Cache)] = self:MakeChannelSafe(Item, Cache)
+    end
+
+    return Copy
+end
+
 --// Хеш скрипта (getscripthash)
 function Process:GetScriptHash(Script: Instance): string?
     if typeof(Script) ~= "Instance" then return nil end
@@ -715,10 +846,14 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
 
     local Id
 	do
-		local identity = getthreadidentity()
-		setthreadidentity(8)
+		local HasIdentity = typeof(getthreadidentity) == "function"
+			and typeof(setthreadidentity) == "function"
+		local Identity = HasIdentity and getthreadidentity() or nil
+
+		if HasIdentity then setthreadidentity(8) end
 		local OkDid, Did = pcall(Remote.GetDebugId, Remote)
-		setthreadidentity(identity)
+		if HasIdentity then setthreadidentity(Identity) end
+
 		Id = (OkDid and Did) or tostring(Remote):sub(-12)
 	end
     local ClassData = self:GetClassData(Remote)
@@ -736,7 +871,7 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     local CallerScript = nil
     local CallerFunction = nil
 
-   local ExtraData = self.ExtraData
+    local ExtraData = self.ExtraData
     if ExtraData then
         self:Merge(Data, ExtraData)
         --// [FIX] Пробрасываем IsActor явно, если его нет в Data
@@ -785,17 +920,50 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
             end
         end
     else
-        --// [FIX] Receive: скрипт из существующих соединений
-        local ClassData = self:GetClassData(Remote)
-        if ClassData then
-            local Signal = Hook:Index(Remote, ClassData.Receive[1])
-            local Connections = self:FilterConnections(Signal)
-            for _, Conn in Connections do
-                if Conn.Function then
-                    local S = self:GetScriptFromFunc(Conn.Function)
-                    if typeof(S) == "Instance" then
-                        CallerScript = S
-                        break
+        --// [FIX] Receive: ищем SourceScript по ВЛАДЕЛЬЦУ соединения, а не
+        --// только CallerScript. Раньше SourceScript для OnClientEvent
+        --// оставался nil (getcallingscript в receive-контексте пуст),
+        --// поэтому "у всех OnClientEvent искать SourceScript" не работало.
+        local ReceiveMethod = ClassData and ClassData.Receive and ClassData.Receive[1]
+
+        if ClassData and ReceiveMethod then
+            if ClassData.IsRemoteFunction then
+                --// OnClientInvoke / OnInvoke — callback-значение,
+                --// RBXScriptSignal у него нет.
+                local CachedScript = self.CallbackScripts[Remote]
+                if typeof(CachedScript) == "Instance" then
+                    SourceScript = CachedScript
+                end
+
+                if typeof(getcallbackvalue) == "function" then
+                    local OkCallback, Callback = pcall(getcallbackvalue, Remote, ReceiveMethod)
+                    if OkCallback and typeof(Callback) == "function" then
+                        CallingFunction = Callback
+
+                        --// Наш собственный детур не должен становиться источником
+                        local Script = self:GetScriptFromFunc(Callback)
+                        if typeof(Script) == "Instance" and not SourceScript then
+                            SourceScript = Script
+                        end
+                    end
+                end
+            else
+                local OkSignal, Signal = pcall(Hook.Index, Hook, Remote, ReceiveMethod)
+
+                if OkSignal and typeof(Signal) == "RBXScriptSignal" then
+                    local Connections = self:FilterConnections(Signal)
+
+                    for _, Connection in Connections do
+                        local Script = self:GetScriptFromConnection(Connection)
+                        if typeof(Script) == "Instance" then
+                            if not SourceScript then
+                                SourceScript = Script
+                                CallingFunction = Connection.Function
+                            elseif Script ~= SourceScript and not CallerScript then
+                                CallerScript = Script
+                                CallerFunction = Connection.Function
+                            end
+                        end
                     end
                 end
             end
@@ -803,6 +971,25 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     end
 
     local CallingScript = getcallingscript()
+
+    --// [FIX] Actor-детект. В actor-VM ExtraData уже стоит. Но вызов из
+    --// actor'а может поймать общий oth-хук главного VM — тогда ExtraData
+    --// нет, и раньше IsActor всегда был false. Определяем по скрипту.
+    local IsActor = ExtraData and ExtraData.IsActor or false
+    local Actor = ExtraData and ExtraData.Actor or nil
+
+    if not IsActor then
+        local DetectedActor = self:ResolveActor(CallingScript, SourceScript, CallerScript, CallingFunction)
+        if DetectedActor then
+            IsActor = true
+            Actor = Actor or DetectedActor
+        end
+    end
+
+    if IsReceive and not CallingScript then
+        CallingScript = SourceScript
+    end
+
     self:Merge(Data, {
         Remote = cloneref(Remote),
 		CallingScript = CallingScript,
@@ -813,11 +1000,25 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         Id = Id,
 		ClassData = ClassData,
         Timestamp = Timestamp,
+        --// Явный boolean: UI показывает строку IsActor всегда.
+        IsActor = IsActor == true,
+        Actor = Actor,
         Args = {...}
     })
 
     local ReturnValues = ProcessCallback(Data, Remote, ...)
     Data.ReturnValues = ReturnValues
+
+    --// [FIX] Actor -> main идёт через BindableEvent. Функции и таблицы
+    --// с метатаблицами этот мост не переживают (Cobalt сериализует их
+    --// в метаданные). Без очистки Fire падал и actor-логи терялись.
+    if ExtraData and ExtraData.IsActor then
+        Data.OriginalFunc = nil
+        Data.CallingFunction = nil
+        Data.CallerFunction = nil
+        Data.Args = self:MakeChannelSafe(Data.Args)
+        Data.ReturnValues = self:MakeChannelSafe(Data.ReturnValues)
+    end
 
     Communication:QueueLog(Data)
 
@@ -864,5 +1065,8 @@ function Process:SetIncomingBlocked(Remote: Instance, Blocked: boolean)
         end
     end
 end
+
+--// Lookup нужен Hook:BeginHooks ещё до Process:Init
+Process:BuildRemoteLookups()
 
 return Process

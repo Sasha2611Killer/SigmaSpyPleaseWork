@@ -153,39 +153,20 @@ function Module:CreateCommChannel(): (number, BindableEvent)
 end
 
 function Module:GetCommChannel(ChannelId: number): BindableEvent?
-	--// Use native if it exists
-	local Force = Config.ForceUseCustomComm
-	if get_comm_channel and not Force then
-		local Ok, Channel = pcall(get_comm_channel, ChannelId)
-		if Ok and Channel then
-			return Channel, false
-		end
-	end
+    --// Use native if it exists
+    local Force = Config.ForceUseCustomComm
+    if get_comm_channel and not Force then
+        local Channel = get_comm_channel(ChannelId)
+        return Channel, false
+    end
 
-	local Parent = self:GetHiddenParent()
-	local Channel = Parent and Parent:FindFirstChild(ChannelId)
+    local Parent = self:GetHiddenParent()
+    local Channel = Parent:FindFirstChild(ChannelId)
 
-	--// [FIX] gethui() в Actor VM может указывать на другой контейнер —
-	--// ищем канал ещё и в общих местах.
-	if not Channel then
-		local CoreGuiService = game:GetService("CoreGui")
-		for _, Other in { CoreGuiService, game } do
-			if typeof(Other) ~= "Instance" or Other == Parent then continue end
-
-			Channel = Other:FindFirstChild(tostring(ChannelId))
-			if Channel then break end
-		end
-	end
-
-	if not Channel then
-		return nil, true
-	end
-
-	--// Wrap the channel (Prevents thread permission errors)
-	local Wrapped = self:NewCommWrap(Channel)
-	return Wrapped, true
+    --// Wrap the channel (Prevents thread permission errors)
+    local Wrapped = self:NewCommWrap(Channel)
+    return Wrapped, true
 end
-
 
 function Module:CheckValue(Value, Inbound: boolean?)
      --// No serializing  needed

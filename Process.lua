@@ -426,6 +426,54 @@ function Process:SetNewReturnSpoofs(NewReturnSpoofs: table)
     ReturnSpoofs = NewReturnSpoofs
 end
 
+function Process:GetScriptFromSource(Source: string): Instance?
+    if type(Source) ~= "string" or Source == "" or Source == "[C]" then
+        return nil
+    end
+
+    --// Быстрый путь: точное совпадение GetFullName
+    local Candidates = { game:GetDescendants() }
+    if typeof(getloadedmodules) == "function" then
+        table.insert(Candidates, getloadedmodules())
+    end
+    if typeof(getrunningscripts) == "function" then
+        table.insert(Candidates, getrunningscripts())
+    end
+    if typeof(getscripts) == "function" then
+        table.insert(Candidates, getscripts())
+    end
+
+    for _, List in Candidates do
+        for _, Script in List do
+            if not Script:IsA("LuaSourceContainer") then continue end
+            local Ok, FullName = pcall(function()
+                return Script:GetFullName()
+            end)
+            if Ok and FullName == Source then
+                return Script
+            end
+        end
+    end
+
+    --// Fallback: по имени чанка (последний сегмент)
+    local TargetName = Source:match("[%w_]+$")
+    if TargetName then
+        local Matches = {}
+        for _, List in Candidates do
+            for _, Script in List do
+                if Script.Name == TargetName and Script:IsA("LuaSourceContainer") then
+                    table.insert(Matches, Script)
+                end
+            end
+        end
+        if #Matches == 1 then
+            return Matches[1]
+        end
+    end
+
+    return nil
+end
+
 --// [FIX] ВСЕ не-Sigma Lua-фреймы + script-хинты с C-фреймов.
 --// Probe v6 (2026-11-03): стек на Delta ДОСТУПЕН. C-фреймы имеют l == -1,
 --// но это НЕ конец стека — идём, пока debug.info(Level,"f") не nil.
@@ -433,64 +481,39 @@ end
 --// загрузчик) собираем в Hints. identity 8 поднимается ЛЕНИВО — только
 --// если getfenv упал. Страховка на executor'ы без identity-функций.
 function Process:FindCallingClosures(_Offset: number?): (table, table)
-    local Getfenv = Hook:GetOriginalFunc(getfenv)
     local Result = {}
     local Hints = {}
     local Seen = {}
 
-    local HasIdentity = typeof(getthreadidentity) == "function"
-        and typeof(setthreadidentity) == "function"
-    local Identity = HasIdentity and getthreadidentity() or nil
-    local Raised = false
-
-    local function RaiseIdentity()
-        if Raised or not HasIdentity then return end
-        Raised = true
-        setthreadidentity(8)
-    end
-
     for Level = 1, 16 do
         local Function = debug.info(Level, "f")
         if not Function then break end
-
         if Seen[Function] then continue end
         Seen[Function] = true
 
         local Source = debug.info(Function, "s")
         local IsC = Source == "[C]"
 
-        local Success, Env = pcall(Getfenv, Function)
-        if not Success then
-            --// Ленивый подъём identity: второй шанс для getfenv
-            RaiseIdentity()
-            Success, Env = pcall(Getfenv, Function)
-            if not Success then continue end
-        end
-
-        if Env == SigmaENV then continue end
-
-        --// script-хинт с ЛЮБОГО не-Sigma фрейма (C-фреймы Delta
-        --// несут env.script игры — это загрузчик/владелец потока)
-        if type(Env) == "table" then
+        --// Hints: script из env (если есть)
+        local Success, Env = pcall(getfenv, Function)
+        if Success and type(Env) == "table" then
             local ScriptHint = rawget(Env, "script")
             if typeof(ScriptHint) == "Instance" then
                 table.insert(Hints, ScriptHint)
             end
         end
 
-        --// C-фреймы как closures не подходят (нет Lua-локалов/констант)
         if IsC then continue end
 
-        table.insert(Result, Function)
+        --// Lua-фрейм: берём Source (путь) как строку
+        if type(Source) == "string" and #Source > 0 then
+            table.insert(Result, { Function = Function, Source = Source })
+        end
         if #Result >= 8 then break end
     end
 
-    if Raised then
-        setthreadidentity(Identity)
-    end
     return Result, Hints
 end
-
 --// Обратная совместимость: первый (ближайший) вызывающий closure
 function Process:FindCallingLClosure(Offset: number)
     return self:FindCallingClosures(Offset)[1]
@@ -832,9 +855,38 @@ local ProcessCallback = newcclosure(function(Data: RemoteData, Remote, ...): tab
 
     if not OriginalFunc then return end
 
-    return {
-        OriginalFunc(Remote, ...)
-    }
+    local Results = { OriginalFunc(Remote, ...) }
+
+    --// [FIX] RemoteFunction: ответ сервера логируем как Incoming (Cobalt-style)
+    local ClassData = Data.ClassData
+    if ClassData and ClassData.IsRemoteFunction and not Data.IsReceive then
+        local ReceiveMethod = ClassData.Receive and ClassData.Receive[1]
+        if ReceiveMethod then
+            local ResultData = {
+                Remote = Remote,
+                Method = ReceiveMethod,
+                IsReceive = true,
+                MetaMethod = "Callback",
+                TransferType = "Receive",
+                IsExploit = checkcaller(),
+                InvokeKind = "Request",
+                Id = Id,
+                ClassData = ClassData,
+                Timestamp = tick(),
+                Args = Data.Args or {},
+                InvokeResult = Results,
+                CallingScript = Data.CallingScript,
+                SourceScript = Data.SourceScript,
+                CallerScript = Data.CallerScript,
+                CallingFunction = nil,
+                IsActor = Data.IsActor,
+                Actor = Data.Actor,
+            }
+            Communication:QueueLog(ResultData)
+        end
+    end
+
+    return Results
 end)
 
 function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
@@ -874,62 +926,71 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     local ExtraData = self.ExtraData
     if ExtraData then
         self:Merge(Data, ExtraData)
-        --// [FIX] Пробрасываем IsActor явно, если его нет в Data
         if Data.IsActor == nil and ExtraData.IsActor then
             Data.IsActor = true
             Data.Actor = ExtraData.Actor
         end
     end
 
-    --// SourceScript = первый Lua-фрейм с валидным Instance (ClientCore).
-    --// CallerScript = первый хинт/скрипт, отличный от SourceScript
-    --// (C-фрейм на Delta несёт env.script загрузчика = Framework).
     if not IsReceive then
         local Closures, Hints = self:FindCallingClosures(6)
 
-        local SourceIndex = nil
-        for i, F in Closures do
+        for _, Entry in Closures do
+            local F = Entry.Function
+            local Src = Entry.Source
+
+            --// 1) env.script
             local S = self:GetScriptFromFunc(F)
             if typeof(S) == "Instance" then
                 CallingFunction = F
                 SourceScript = S
-                SourceIndex = i
+                break
+            end
+
+            --// 2) debug.info source -> GetFullName
+            local BySource = self:GetScriptFromSource(Src)
+            if typeof(BySource) == "Instance" then
+                CallingFunction = F
+                SourceScript = BySource
                 break
             end
         end
 
-        if SourceIndex then
-            --// 1) хинты (C-фреймы: владелец потока/загрузчик)
+        --// 3) fallback: Hints (C-фреймы несут env.script загрузчика)
+        if not SourceScript and #Hints > 0 then
             for _, Hint in Hints do
-                if typeof(Hint) == "Instance" and Hint ~= SourceScript then
-                    CallerScript = Hint
+                if typeof(Hint) == "Instance" then
+                    SourceScript = Hint
                     break
                 end
             end
+        end
 
-            --// 2) fallback: скрипт следующего Lua-фрейма
-            if not CallerScript then
-                for i = SourceIndex + 1, #Closures do
-                    local S = self:GetScriptFromFunc(Closures[i])
-                    if typeof(S) == "Instance" and S ~= SourceScript then
-                        CallerFunction = Closures[i]
-                        CallerScript = S
+        --// 4) CallerScript: следующий Lua-фрейм или второй Hint
+        if SourceScript then
+            for _, Entry in Closures do
+                local S = self:GetScriptFromFunc(Entry.Function)
+                    or self:GetScriptFromSource(Entry.Source)
+                if typeof(S) == "Instance" and S ~= SourceScript then
+                    CallerScript = S
+                    CallerFunction = Entry.Function
+                    break
+                end
+            end
+            if not CallerScript and #Hints > 0 then
+                for _, Hint in Hints do
+                    if typeof(Hint) == "Instance" and Hint ~= SourceScript then
+                        CallerScript = Hint
                         break
                     end
                 end
             end
         end
     else
-        --// [FIX] Receive: ищем SourceScript по ВЛАДЕЛЬЦУ соединения, а не
-        --// только CallerScript. Раньше SourceScript для OnClientEvent
-        --// оставался nil (getcallingscript в receive-контексте пуст),
-        --// поэтому "у всех OnClientEvent искать SourceScript" не работало.
         local ReceiveMethod = ClassData and ClassData.Receive and ClassData.Receive[1]
 
         if ClassData and ReceiveMethod then
             if ClassData.IsRemoteFunction then
-                --// OnClientInvoke / OnInvoke — callback-значение,
-                --// RBXScriptSignal у него нет.
                 local CachedScript = self.CallbackScripts[Remote]
                 if typeof(CachedScript) == "Instance" then
                     SourceScript = CachedScript
@@ -939,8 +1000,6 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
                     local OkCallback, Callback = pcall(getcallbackvalue, Remote, ReceiveMethod)
                     if OkCallback and typeof(Callback) == "function" then
                         CallingFunction = Callback
-
-                        --// Наш собственный детур не должен становиться источником
                         local Script = self:GetScriptFromFunc(Callback)
                         if typeof(Script) == "Instance" and not SourceScript then
                             SourceScript = Script
@@ -949,10 +1008,8 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
                 end
             else
                 local OkSignal, Signal = pcall(Hook.Index, Hook, Remote, ReceiveMethod)
-
                 if OkSignal and typeof(Signal) == "RBXScriptSignal" then
                     local Connections = self:FilterConnections(Signal)
-
                     for _, Connection in Connections do
                         local Script = self:GetScriptFromConnection(Connection)
                         if typeof(Script) == "Instance" then
@@ -972,9 +1029,6 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
 
     local CallingScript = getcallingscript()
 
-    --// [FIX] Actor-детект. В actor-VM ExtraData уже стоит. Но вызов из
-    --// actor'а может поймать общий oth-хук главного VM — тогда ExtraData
-    --// нет, и раньше IsActor всегда был false. Определяем по скрипту.
     local IsActor = ExtraData and ExtraData.IsActor or false
     local Actor = ExtraData and ExtraData.Actor or nil
 
@@ -994,13 +1048,11 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         Remote = cloneref(Remote),
 		CallingScript = CallingScript,
         CallingFunction = CallingFunction,
-        --// Fallback: если стек пуст — getcallingscript() (владелец потока)
         SourceScript = SourceScript or CallingScript,
         CallerScript = CallerScript,
         Id = Id,
 		ClassData = ClassData,
         Timestamp = Timestamp,
-        --// Явный boolean: UI показывает строку IsActor всегда.
         IsActor = IsActor == true,
         Actor = Actor,
         Args = {...}
@@ -1009,9 +1061,6 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     local ReturnValues = ProcessCallback(Data, Remote, ...)
     Data.ReturnValues = ReturnValues
 
-    --// [FIX] Actor -> main идёт через BindableEvent. Функции и таблицы
-    --// с метатаблицами этот мост не переживают (Cobalt сериализует их
-    --// в метаданные). Без очистки Fire падал и actor-логи терялись.
     if ExtraData and ExtraData.IsActor then
         Data.OriginalFunc = nil
         Data.CallingFunction = nil

@@ -215,15 +215,17 @@ end
 function Hook:RunOnActors(Code: string, ChannelId: number)
 	if not getactors or not run_on_actor then return end
 
-	--// Cobalt-style ретрай: run_on_actor может падать на неинициализированных
-	--// акторах (LuaStateProxy) — повторяем до 10 раз с паузой
 	local function HookActor(Actor)
 		task.spawn(function()
 			local Hooked = false
 			local Attempts = 0
+
 			repeat
-				Hooked = pcall(run_on_actor, Actor, Code, ChannelId)
+				--// БЫЛО: pcall(run_on_actor, Actor, Code, ChannelId)
+				--// СТАЛО: + Actor вторым vararg'ом
+				Hooked = pcall(run_on_actor, Actor, Code, ChannelId, Actor)
 				Attempts += 1
+
 				if not Hooked then
 					task.wait(0.25)
 				end
@@ -231,25 +233,28 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end)
 	end
 
-	--// Современная библиотека: getactorstates может возвращать НЕ Actor-инстансы,
-	--// а состояния — треды (run_on_thread) или LuaStateProxy (:Execute).
-	--// Классический getactors() такие акторы не видит.
 	local SkipClassic = false
 	if typeof(getactorstates) == "function" then
 		local Ok, States = pcall(getactorstates)
 		if Ok and type(States) == "table" then
 			local First = next(States)
+
 			if type(First) == "thread" and typeof(run_on_thread) == "function" then
 				for _, State in States do
-					pcall(run_on_thread, State, Code, ChannelId)
+					--// Actor для треда неизвестен — передаём nil,
+					--// IsActor всё равно выставится в actor-чанке.
+					pcall(run_on_thread, State, Code, ChannelId, nil)
 				end
-				SkipClassic = true -- состояния захуканы — getactors-проход не нужен
+				SkipClassic = true
 			elseif (type(First) == "userdata" or type(First) == "table") and First.IsActorState then
 				local HookedAny = false
 				for _, Proxy in States do
 					if not Proxy.IsActorState then continue end
+
+					local Actors = Proxy:GetActors()
 					local OkH = pcall(function()
-						return Proxy:Execute(Code, ChannelId, Proxy:GetActors()[1])
+						--// уже правильный порядок: ChannelId, Actor
+						return Proxy:Execute(Code, ChannelId, Actors[1])
 					end)
 					HookedAny = HookedAny or OkH
 				end
@@ -260,9 +265,8 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
-	--// Текущие + удалённые (неинициализированные) акторы — как в Cobalt
 	if not SkipClassic then
-		for _, Category in {getactors(), typeof(getdeletedactors) == "function" and getdeletedactors() or {}} do
+		for _, Category in { getactors(), typeof(getdeletedactors) == "function" and getdeletedactors() or {} } do
 			if Category then
 				for _, Actor in next, Category do
 					HookActor(Actor)
@@ -271,8 +275,6 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
-	--// Акторы, созданные ПОЗЖЕ: нативное событие → fallback DescendantAdded.
-	--// В старой версии такие акторы вообще не хукались.
 	local StateCreated = typeof(on_actor_state_created) == "RBXScriptSignal" and on_actor_state_created or nil
 	if StateCreated then
 		StateCreated:Connect(HookActor)

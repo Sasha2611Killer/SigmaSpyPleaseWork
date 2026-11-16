@@ -572,24 +572,44 @@ function Process:IsScriptAvailable(Script: Instance): boolean
 end
 
 function Process:ConnectionIsValid(Connection: table): boolean
-    if Connection.Function == nil then
-        return false
-    end
+	--// [FIX] Не требуем Function: строка коннекта полезна и без него
+	--// (Enabled / Thread / принадлежность actor'у).
+	if typeof(Connection) ~= "table" then
+		return false
+	end
 
-    return true
+	return Connection.Enabled ~= nil
+		or Connection.Function ~= nil
+		or Connection.Thread ~= nil
 end
 
 function Process:FilterConnections(Signal: RBXScriptSignal): table
-    local Processed = {}
+	local Processed = {}
 
-    for _, Connection in getconnections(Signal) do
-        if self.LogConnectionFunctions[Connection.Function] then continue end
-        if Hook.IsSpyConnectionFunction and Hook:IsSpyConnectionFunction(Connection.Function) then continue end
-        if not self:ConnectionIsValid(Connection) then continue end
-        table.insert(Processed, Connection)
-    end
+	local Ok, Connections = pcall(getconnections, Signal)
+	if not Ok or typeof(Connections) ~= "table" then
+		return Processed
+	end
 
-    return Processed
+	for _, Connection in Connections do
+		local Function = Connection.Function
+
+		--// Свои логгеры не показываем (они и так в реестре/env-токене)
+		if Function and self.LogConnectionFunctions[Function] then
+			continue
+		end
+		if Function and Hook.IsSpyConnectionFunction and Hook:IsSpyConnectionFunction(Function) then
+			continue
+		end
+
+		if not self:ConnectionIsValid(Connection) then
+			continue
+		end
+
+		table.insert(Processed, Connection)
+	end
+
+	return Processed
 end
 
 function Process:IsSigmaSpyENV(Env: table): boolean

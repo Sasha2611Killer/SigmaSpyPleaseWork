@@ -399,9 +399,12 @@ function Hook:BeginHooks()
 		OriginalNameCall = OthOriginal
 	else
 		OriginalNameCall = self:ReplaceMetaMethod(game, "__namecall", function(self, ...)
-			local Method = getnamecallmethod()
-			return ProcessRemote(OriginalNameCall, "__namecall", self, Method, ...)
-		end)
+    local Method = getnamecallmethod()
+    if typeof(self) == "Instance" and self:IsA("RemoteFunction") then
+        print("[SigmaSpy] RemoteFunction __namecall:", self:GetFullName(), "Method:", Method)
+    end
+    return ProcessRemote(OriginalNameCall, "__namecall", self, Method, ...)
+end)
 	end
 
 	Merge(self, {

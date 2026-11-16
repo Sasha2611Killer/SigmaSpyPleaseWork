@@ -9,8 +9,6 @@ local Hook = {
 	OriginalNamecall = nil,
 	OriginalIndex = nil,
 	PreviousFunctions = {},
-	--// Remote, на которых уже стоит receive-хук (защита от дублей)
-	ReceiveHooked = setmetatable({}, {__mode = "k"}),
 	DefaultConfig = {
 		FunctionPatches = true
 	}
@@ -76,27 +74,11 @@ local function Merge(Base: table, New: table)
 end
 
 function Hook:Index(Object: Instance, Key: string)
-	--// [FIX] В actor-VM / на экзекьюторах без identity-функций
-	--// getthreadidentity/setthreadidentity могут отсутствовать.
-	local HasIdentity = typeof(getthreadidentity) == "function"
-		and typeof(setthreadidentity) == "function"
-
-	if not HasIdentity then
-		local Ok, Returned = pcall(function()
-			return Object[Key]
-		end)
-		return Ok and Returned or nil
-	end
-
-	local Identity = getthreadidentity()
-	setthreadidentity(8)
-	local Ok, Returned = pcall(function()
-		return Object[Key]
-	end)
-	setthreadidentity(Identity)
-
-	if Ok then return Returned end
-	return nil
+    local identity = getthreadidentity()
+    setthreadidentity(8)
+    local returned = Object[Key]
+    setthreadidentity(identity)
+	return returned
 end
 
 function Hook:PushConfig(Overwrites)
@@ -152,13 +134,8 @@ function Hook:HookMetaMethod(Object: Instance, Call: string, Callback: MetaFunc)
 end
 
 function Hook:PatchFunctions()
-	--// Идемпотентность: не патчим второй раз (actor + BeginHooks из main)
-	if self.FunctionsPatched then return end
-
 	--// Check if this function is disabled in the configuration
 	if (Configuration and Configuration.NoFunctionPatching) or (Config and Config.NoFunctionPatching) then return end
-
-	self.FunctionsPatched = true
 
 	--// [FIX 2026-11-03] КЛАССИКА. clonefunction(clonefunction) УБРАН —
 	--// недопустим и спамил ошибку в консоль (строка с "clonefunction"
@@ -238,17 +215,15 @@ end
 function Hook:RunOnActors(Code: string, ChannelId: number)
 	if not getactors or not run_on_actor then return end
 
+	--// Cobalt-style ретрай: run_on_actor может падать на неинициализированных
+	--// акторах (LuaStateProxy) — повторяем до 10 раз с паузой
 	local function HookActor(Actor)
 		task.spawn(function()
 			local Hooked = false
 			local Attempts = 0
-
 			repeat
-				--// БЫЛО: pcall(run_on_actor, Actor, Code, ChannelId)
-				--// СТАЛО: + Actor вторым vararg'ом
-				Hooked = pcall(run_on_actor, Actor, Code, ChannelId, Actor)
+				Hooked = pcall(run_on_actor, Actor, Code, ChannelId)
 				Attempts += 1
-
 				if not Hooked then
 					task.wait(0.25)
 				end
@@ -256,28 +231,25 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end)
 	end
 
+	--// Современная библиотека: getactorstates может возвращать НЕ Actor-инстансы,
+	--// а состояния — треды (run_on_thread) или LuaStateProxy (:Execute).
+	--// Классический getactors() такие акторы не видит.
 	local SkipClassic = false
 	if typeof(getactorstates) == "function" then
 		local Ok, States = pcall(getactorstates)
 		if Ok and type(States) == "table" then
 			local First = next(States)
-
 			if type(First) == "thread" and typeof(run_on_thread) == "function" then
 				for _, State in States do
-					--// Actor для треда неизвестен — передаём nil,
-					--// IsActor всё равно выставится в actor-чанке.
-					pcall(run_on_thread, State, Code, ChannelId, nil)
+					pcall(run_on_thread, State, Code, ChannelId)
 				end
-				SkipClassic = true
+				SkipClassic = true -- состояния захуканы — getactors-проход не нужен
 			elseif (type(First) == "userdata" or type(First) == "table") and First.IsActorState then
 				local HookedAny = false
 				for _, Proxy in States do
 					if not Proxy.IsActorState then continue end
-
-					local Actors = Proxy:GetActors()
 					local OkH = pcall(function()
-						--// уже правильный порядок: ChannelId, Actor
-						return Proxy:Execute(Code, ChannelId, Actors[1])
+						return Proxy:Execute(Code, ChannelId, Proxy:GetActors()[1])
 					end)
 					HookedAny = HookedAny or OkH
 				end
@@ -288,8 +260,9 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
+	--// Текущие + удалённые (неинициализированные) акторы — как в Cobalt
 	if not SkipClassic then
-		for _, Category in { getactors(), typeof(getdeletedactors) == "function" and getdeletedactors() or {} } do
+		for _, Category in {getactors(), typeof(getdeletedactors) == "function" and getdeletedactors() or {}} do
 			if Category then
 				for _, Actor in next, Category do
 					HookActor(Actor)
@@ -298,6 +271,8 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
+	--// Акторы, созданные ПОЗЖЕ: нативное событие → fallback DescendantAdded.
+	--// В старой версии такие акторы вообще не хукались.
 	local StateCreated = typeof(on_actor_state_created) == "RBXScriptSignal" and on_actor_state_created or nil
 	if StateCreated then
 		StateCreated:Connect(HookActor)
@@ -320,105 +295,9 @@ local function ProcessRemote(OriginalFunc, MetaMethod: string, self, Method: str
 	}, self, ...)
 end
 
---// [FIX] Вызовы, которые уже обрабатывает __namecall. Если та же C-функция
---// дополнительно захукана через __index, второй хук не должен логировать
---// повторно (двойной лог + двойной обход стека).
-local NamecallActive = setmetatable({}, {__mode = "k"})
-
---// [FIX] Дешёвый pre-check ВНУТРИ __namecall.
---// Раньше любой namecall (включая self:GetFullName() из старого print,
---// Script:IsA() из GetScriptFromFunc и т.д.) заходил в ProcessRemote.
---// Вызов метода инстанса изнутри __namecall = повторный вход в этот же
---// хук, а print(... self:GetFullName()) давал бесконечную рекурсию
---// (C stack overflow -> вылет игры). Теперь сюда попадают только
---// реальные remote-методы, и вложенные вызовы сразу уходят в оригинал.
---// ВАЖНО: здесь нельзя вызывать методы инстансов (GetFullName/IsA/...).
-local function IsHookedSend(Object, Method: string): boolean
-	if typeof(Object) ~= "Instance" then return false end
-	if not Process then return false end
-
-	local Lookup = Process.RemoteSendLookup
-	if not Lookup then
-		Process:BuildRemoteLookups()
-		Lookup = Process.RemoteSendLookup
-	end
-
-	local Methods = Lookup and Lookup[Object.ClassName]
-	if not Methods or not Methods[Method] then return false end
-
-	if typeof(Process.IsProtectedRemote) == "function" and Process:IsProtectedRemote(Object) then
-		return false
-	end
-
-	return true
-end
-
---// Пускаем вызов в ProcessRemote.
---// ВАЖНО про возврат: __namecall заворачивается двумя разными способами.
---//  * oth.hook      — сырой хук: значения нужно вернуть РАСПАКОВАННЫМИ.
---//  * ReplaceMetaMethod — через HookMiddle: он ждёт УПАКОВАННУЮ таблицу
---//    (или nil, тогда сам зовёт оригинал и распаковывает).
---// Поэтому здесь возвращаем УПАКОВАННУЮ таблицу / nil, а распаковкой
---// занимается вызывающая ветка. Раньше распаковка была тут: пустой ответ
---// FireServer превращался в "no values" -> HookMiddle звал оригинал ЕЩЁ РАЗ
---// (двойная отправка remote), а InvokeServer с таблицей ломал HookMiddle.
-local function CallNamecall(OriginalFunc, Object, Method: string, ...)
-	local Thread = coroutine.running()
-	local Active = NamecallActive[Thread]
-	if not Active then
-		Active = {}
-		NamecallActive[Thread] = Active
-	end
-
-	--// Вложенный вызов на том же объекте (например self:GetFullName()
-	--// изнутри обработки) — отдаём оригиналу, без рекурсии.
-	if Active[Object] then return end
-
-	--// Знаем, вызвался ли уже оригинал (внутри ProcessCallback). Если да,
-	--// ошибку логирования нельзя "ронять" в fallback — иначе remote
-	--// отправится второй раз.
-	local OriginalCalled = false
-	local function Tracked(...)
-		OriginalCalled = true
-		return OriginalFunc(...)
-	end
-
-	Active[Object] = true
-	local Ok, ReturnValues = pcall(ProcessRemote, Tracked, "__namecall", Object, Method, ...)
-	Active[Object] = nil
-
-	if Ok then return ReturnValues end
-
-	--// Логирование упало. Оригинал уже выполнен -> не дублируем вызов.
-	if OriginalCalled then return {} end
-
-	--// Оригинал не выполнялся -> пусть его вызовет обёртка, как обычно.
-	return nil
-end
-
---// [FIX] Дедуп: некоторые классы отдают ОДНУ И ТУ ЖЕ C-функцию
---// (RemoteEvent.FireServer == UnreliableRemoteEvent.FireServer).
---// Без этого повторный hookfunction заворачивал уже завёрнутую функцию
---// -> двойные логи и лишние кадры в стеке.
-local HookedIndexFunctions = setmetatable({}, {__mode = "k"})
-
 function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
-	local Ok, Remote = pcall(Instance.new, ClassName)
-	if not Ok or not Remote then return end
-
+	local Remote = Instance.new(ClassName)
 	local Func = Remote[FuncName]
-	if typeof(Func) ~= "function" then
-		--// алиасы вроде "fireServer"/"fireserver" не являются свойствами
-		pcall(function() Remote:Destroy() end)
-		return
-	end
-
-	if HookedIndexFunctions[Func] then
-		pcall(function() Remote:Destroy() end)
-		return
-	end
-	HookedIndexFunctions[Func] = true
-
 	local OriginalFunc
 
 	--// Remotes will share the same functions
@@ -426,31 +305,19 @@ function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
 	--// Addionally, this is for __index calls.
 	--// 	A __namecall hook will not detect this
 	OriginalFunc = self:HookFunction(Func, function(self, ...)
-		--// Уже логируется через __namecall на этом же треде — не дублируем.
-		--// Возвращаем nil: HookMiddle сам вызовет оригинал ровно один раз
-		--// (вернуть результат оригинала нельзя — он его ещё раз распакует).
-		local Active = NamecallActive[coroutine.running()]
-		if Active and Active[self] then return end
-
 		--// Check if the Object is allowed 
 		if not Process:RemoteAllowed(self, "Send", FuncName) then return end
 
 		--// Process the remote data
 		return ProcessRemote(OriginalFunc, "__index", self, FuncName, ...)
 	end)
-
-	pcall(function() Remote:Destroy() end)
 end
 
 function Hook:HookRemoteIndexes()
 	local RemoteClassData = Process.RemoteClassData
 	for ClassName, Data in RemoteClassData do
-		for _, FuncName in Data.Send or {} do
-			local Ok, Err = pcall(self.HookRemoteTypeIndex, self, ClassName, FuncName)
-			if not Ok and Communication then
-				Communication:ConsolePrint("Index hook:", tostring(Err):sub(1, 120))
-			end
-		end
+		local FuncName = Data.Send[1]
+		self:HookRemoteTypeIndex(ClassName, FuncName)
 	end
 end
 
@@ -500,14 +367,16 @@ function Hook:BypassAdonis()
 end				
 
 function Hook:BeginHooks()
-	if self.HooksStarted then return end
-	self.HooksStarted = true
-
-	local InActor = Process ~= nil and Process.ExtraData ~= nil
-		and Process.ExtraData.IsActor == true
-
-	local UseOth = not InActor
-		and typeof(oth) == "table" and typeof(oth.hook) == "function"
+	--// Два режима, переключаются Configuration.UseOthHooks:
+	--// true  — oth (отдельный тред): детекторам не виден, но обход
+	--//         стека не видит игру → обе кнопки Decompile показывают
+	--//         один скрипт (fallback getcallingscript).
+	--// false — ПРЯМАЯ ЗАПИСЬ __namecall: обработчик на игровом треде,
+	--//         полная атрибуция (SourceScript/CallerScript различаются).
+	--//         Детекты Adonis нейтрализует BypassAdonis.
+	--// Оба режима распаковывают результат (Unpack) — без этого игра
+	--// получает таблицу вместо значений (зависание камеры).
+	local UseOth = typeof(oth) == "table" and typeof(oth.hook) == "function"
 		and (not Configuration or Configuration.UseOthHooks ~= false)
 
 	local OriginalNameCall
@@ -517,12 +386,8 @@ function Hook:BeginHooks()
 		OthOriginal = oth.hook(getrawmetatable(game).__namecall, function(self, ...)
 			local Method = getnamecallmethod()
 
-			if not IsHookedSend(self, Method) then
-				return OthOriginal(self, ...)
-			end
-
-			local ReturnValues = CallNamecall(OthOriginal, self, Method, ...)
-			if ReturnValues then
+			local Ok, ReturnValues = pcall(ProcessRemote, OthOriginal, "__namecall", self, Method, ...)
+			if Ok and ReturnValues then
 				return Process:Unpack(ReturnValues)
 			end
 
@@ -530,29 +395,15 @@ function Hook:BeginHooks()
 		end)
 		OriginalNameCall = OthOriginal
 	else
-		local RawOriginal
-		RawOriginal = hookmetamethod(game, "__namecall", function(self, ...)
+		OriginalNameCall = self:ReplaceMetaMethod(game, "__namecall", function(self, ...)
 			local Method = getnamecallmethod()
-
-			if not IsHookedSend(self, Method) then
-				return RawOriginal(self, ...)
-			end
-
-			local ReturnValues = CallNamecall(RawOriginal, self, Method, ...)
-			if ReturnValues then
-				return Process:Unpack(ReturnValues)
-			end
-
-			return RawOriginal(self, ...)
+			return ProcessRemote(OriginalNameCall, "__namecall", self, Method, ...)
 		end)
-		OriginalNameCall = RawOriginal
 	end
 
 	Merge(self, {
 		OriginalNamecall = OriginalNameCall,
 	})
-
-	pcall(self.HookRemoteIndexes, self)
 end
 --// Скрытие функции из стека (Cobalt делает так для детуров).
 --// Executor без setstackhidden — просто пропускаем (pcall).
@@ -571,15 +422,7 @@ function Hook:HookClientInvoke(Remote, Method, Callback)
 	--// Some executors like Potassium will throw a error if the Callback value is nil
 	if not Success then return end
 	if not Function then return end
-
-	--// [FIX] Запоминаем скрипт-владельца callback ДО подмены.
-	--// У OnClientInvoke/OnInvoke нет RBXScriptSignal, поэтому SourceScript
-	--// для входящих вызовов берём из этого кэша (см. Process:ProcessRemote).
-	local OriginalScript = Process:GetScriptFromFunc(Function)
-	if typeof(OriginalScript) == "Instance" then
-		Process.CallbackScripts[Remote] = OriginalScript
-	end
-
+	
 	--// Test hookfunction
 	local HookSuccess = pcall(function()
 		self:HookFunction(Function, Callback)
@@ -598,7 +441,7 @@ function Hook:HookClientInvoke(Remote, Method, Callback)
 	pcall(function()
 		OriginalEnv = getfenv(Function)
 	end)
-
+	local OriginalScript = rawget(OriginalEnv, "script")
 	local Trampoline = trampoline_call or (typeof(syn) == "table" and syn.trampoline_call) or nil
 
 	if Trampoline then
@@ -611,16 +454,9 @@ function Hook:HookClientInvoke(Remote, Method, Callback)
 		})
 	else
 		task.spawn(function()
-			local HasIdentity = typeof(getthreadidentity) == "function"
-				and typeof(setthreadidentity) == "function"
-			local Identity = HasIdentity and getthreadidentity() or nil
-
-			if HasIdentity then setthreadidentity(2) end
-			pcall(function() setfenv(0, OriginalEnv) end)
-			pcall(function()
-				Remote[Method] = Detour
-			end)
-			if HasIdentity then setthreadidentity(Identity) end
+			setthreadidentity(2)
+			setfenv(0, OriginalEnv)
+			Remote[Method] = Detour
 		end)
 	end
 end
@@ -638,20 +474,12 @@ function Hook:ConnectClientRecive(Remote)
 
 	--// Check if the Object has Remote class data
     local ClassData = Process:GetClassData(Remote)
-	if not ClassData or not ClassData.Receive then return end
-
     local IsRemoteFunction = ClassData.IsRemoteFunction
 	local NoReciveHook = ClassData.NoReciveHook
     local Method = ClassData.Receive[1]
-	if not Method then return end
 
 	--// Check if the Recive should be hooked
 	if NoReciveHook then return end
-
-	--// Не подключаем один и тот же remote дважды (сканы + DescendantAdded)
-	local ReceiveHooked = self.ReceiveHooked
-	if ReceiveHooked[Remote] then return end
-	ReceiveHooked[Remote] = true
 
 	--// New callback function (скрыт из стека, Cobalt-style)
 	local Callback = HideFromStack(function(...)
@@ -678,17 +506,10 @@ function Hook:ConnectClientRecive(Remote)
 
 	--// Connect remote
 	if not IsRemoteFunction then
-		local Ok, Connection = pcall(function()
-			return Remote[Method]:Connect(Callback)
-		end)
-
-		if Ok and Connection then
-			--// Сохраняем соединение для возможного использования
-			Process:RememberConnection(Remote, Connection, getcallingscript())
-		else
-			ReceiveHooked[Remote] = nil
-		end
-	else
+   		Remote[Method]:Connect(Callback)
+	else -- Remote functions
+		--// [ANTI-DETECT] Детур OnClientInvoke требует hookfunction на
+		--// игровой колбэк — детектится. В стелс-режиме пропускаем.
 		if Configuration and Configuration.StealthReceive then return end
 		self:HookClientInvoke(Remote, Method, Callback)
 	end
@@ -713,12 +534,7 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 			Communication = Communication,
 			Process = ProcessLib,
 			Config = Config,
-			Hook = self,
-			--// В главном VM Configuration приходит из загрузчика. В actor-VM
-			--// его нет (CompileModule пропускает таблицы), но актору он и не
-			--// нужен: PatchFunctions/StealthReceive там не применяются,
-			--// а BeginHooks в акторе всегда идёт напрямую (без oth).
-			Configuration = Libraries.Configuration or Configuration
+			Hook = self
 		},
 		Services = setmetatable({}, {
 			__index = function(self, Name: string): Instance
@@ -747,12 +563,8 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 			ProcessLib:SetNewReturnSpoofs(Spoofs)
 		end,
 		["BeginHooks"] = function(Config)
-			--// Функциональные патчи нужны только в главном VM. В actor-VM
-			--// они могут подменить pcall/getfenv самой игры — не трогаем.
-			local InActor = Process and Process.ExtraData and Process.ExtraData.IsActor
-
-			if Config and Config.PatchFunctions and not InActor then
-				pcall(self.PatchFunctions, self)
+			if Config.PatchFunctions then
+				self:PatchFunctions()
 			end
 			self:BeginHooks()
 			Communication:ConsolePrint("Hooks loaded")
@@ -782,12 +594,8 @@ function Hook:LoadMetaHooks(ActorCode: string, ChannelId: number)
 end
 
 function Hook:LoadReceiveHooks()
-	--// Идемпотентность: actor вызывает сам + может прийти BeginHooks
-	if self.ReceiveHooksLoaded then return end
-	self.ReceiveHooksLoaded = true
-
 	local NoReceiveHooking = Config.NoReceiveHooking
-	local BlackListedServices = Config.BlackListedServices or {}
+	local BlackListedServices = Config.BlackListedServices
 
 	if NoReceiveHooking then return end
 

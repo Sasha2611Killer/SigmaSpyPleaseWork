@@ -263,9 +263,8 @@ function Files:MakeActorScript(Scripts, ChannelId: number): string
 	}
 	]]
 
-	--// пробрасывает (ChannelId, Actor) из run_on_actor,
-	--// а не таблицу. BeginService сам разберёт varargs как надо.
-	ActorCode ..= `Libraries.Hook:BeginService(Libraries, ExtraData, ...)`
+	ActorCode ..= `Libraries.Hook:BeginService(Libraries, ExtraData, ...)\n`
+	ActorCode ..= `Libraries.Hook:LoadReceiveHooks()`  -- <-- ДОБАВИТЬ
 
 	return ActorCode
 end

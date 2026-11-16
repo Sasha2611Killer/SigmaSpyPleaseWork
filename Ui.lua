@@ -39,6 +39,7 @@ local Ui = {
 		"CallingScript",
 		"CallerScript",
 		"IsActor",
+		"Actor",
 		"ScriptHash",
 		"Id"
 	},

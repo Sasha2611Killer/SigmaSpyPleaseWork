@@ -508,7 +508,9 @@ function Hook:ConnectClientRecive(Remote)
 
 	--// Connect remote
 	if not IsRemoteFunction then
-   		Remote[Method]:Connect(Callback)
+        local Connection = Remote[Method]:Connect(Callback)
+        --// [FIX] Запоминаем, какой скрипт создал соединение
+        Process:RememberConnection(Remote, Connection, getcallingscript())
 	else -- Remote functions
 		--// [ANTI-DETECT] Детур OnClientInvoke требует hookfunction на
 		--// игровой колбэк — детектится. В стелс-режиме пропускаем.

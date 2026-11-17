@@ -134,13 +134,9 @@ function Hook:HookMetaMethod(Object: Instance, Call: string, Callback: MetaFunc)
 end
 
 function Hook:PatchFunctions()
-	--// Check if this function is disabled in the configuration
 	if (Configuration and Configuration.NoFunctionPatching) or (Config and Config.NoFunctionPatching) then return end
+	if self.PatchesLoaded then return end
 
-	--// [FIX 2026-11-03] КЛАССИКА. clonefunction(clonefunction) УБРАН —
-	--// недопустим и спамил ошибку в консоль (строка с "clonefunction"
-	--// в логе = риск по списку Adonis). Защищённая копия — только
-	--// hookfunction; цели клонируем обычным clonefunction.
 	local _hookfunction = clonefunction(hookfunction)
 
 	local Patches = {
@@ -148,7 +144,6 @@ function Hook:PatchFunctions()
 			local Responce = {OldFunc(Func, ...)}
 			local Success, Error = Responce[1], Responce[2]
 
-			--// Только C stack overflow; обычные ошибки не трогаем
 			if Success == false and type(Error) == "string"
 				and not iscclosure(Func) and Error:find("C stack overflow")
 			then
@@ -166,10 +161,7 @@ function Hook:PatchFunctions()
 		end,
 		[getfenv] = function(OldFunc, Level: number, ...)
 			Level = Level or 1
-
-			if type(Level) == "number" then
-				Level += 2
-			end
+			if type(Level) == "number" then Level += 2 end
 
 			local Responce = {OldFunc(Level, ...)}
 			local ENV = Responce[1]
@@ -183,8 +175,10 @@ function Hook:PatchFunctions()
 		end
 	}
 
-	--// Hook each function
 	for Func, CallBack in Patches do
+		--// уже пропатчили в прошлой (упавшей) попытке — не хукаем повторно
+		if self.PreviousFunctions[Func] then continue end
+
 		local Original = clonefunction(Func)
 		local Wrapped = newcclosure(CallBack)
 
@@ -194,6 +188,9 @@ function Hook:PatchFunctions()
 
 		self.PreviousFunctions[Func] = Original
 	end
+
+	--// ставим только когда всё прошло без ошибок
+	self.PatchesLoaded = true
 end
 
 function Hook:GetOriginalFunc(Func)
@@ -215,14 +212,15 @@ end
 function Hook:RunOnActors(Code: string, ChannelId: number)
 	if not getactors or not run_on_actor then return end
 
-	--// Cobalt-style ретрай: run_on_actor может падать на неинициализированных
-	--// акторах (LuaStateProxy) — повторяем до 10 раз с паузой
+	--// ретрай: run_on_actor падает на неинициализированных акторах
 	local function HookActor(Actor)
+		if typeof(Actor) ~= "Instance" then return end
 		task.spawn(function()
 			local Hooked = false
 			local Attempts = 0
 			repeat
-				Hooked = pcall(run_on_actor, Actor, Code, ChannelId)
+				--// ChannelId + Actor пробрасываем varargs'ами
+				Hooked = pcall(run_on_actor, Actor, Code, ChannelId, Actor)
 				Attempts += 1
 				if not Hooked then
 					task.wait(0.25)
@@ -231,9 +229,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end)
 	end
 
-	--// Современная библиотека: getactorstates может возвращать НЕ Actor-инстансы,
-	--// а состояния — треды (run_on_thread) или LuaStateProxy (:Execute).
-	--// Классический getactors() такие акторы не видит.
+	--// getactorstates: треды (run_on_thread) или LuaStateProxy (:Execute)
 	local SkipClassic = false
 	if typeof(getactorstates) == "function" then
 		local Ok, States = pcall(getactorstates)
@@ -241,15 +237,16 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 			local First = next(States)
 			if type(First) == "thread" and typeof(run_on_thread) == "function" then
 				for _, State in States do
-					pcall(run_on_thread, State, Code, ChannelId)
+					pcall(run_on_thread, State, Code, ChannelId, nil)
 				end
-				SkipClassic = true -- состояния захуканы — getactors-проход не нужен
+				SkipClassic = true
 			elseif (type(First) == "userdata" or type(First) == "table") and First.IsActorState then
 				local HookedAny = false
 				for _, Proxy in States do
 					if not Proxy.IsActorState then continue end
+					local Actors = Proxy:GetActors()
 					local OkH = pcall(function()
-						return Proxy:Execute(Code, ChannelId, Proxy:GetActors()[1])
+						return Proxy:Execute(Code, ChannelId, Actors[1])
 					end)
 					HookedAny = HookedAny or OkH
 				end
@@ -260,7 +257,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
-	--// Текущие + удалённые (неинициализированные) акторы — как в Cobalt
+	--// текущие + удалённые (неинициализированные)
 	if not SkipClassic then
 		for _, Category in {getactors(), typeof(getdeletedactors) == "function" and getdeletedactors() or {}} do
 			if Category then
@@ -271,8 +268,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
-	--// Акторы, созданные ПОЗЖЕ: нативное событие → fallback DescendantAdded.
-	--// В старой версии такие акторы вообще не хукались.
+	--// акторы, созданные ПОЗЖЕ
 	local StateCreated = typeof(on_actor_state_created) == "RBXScriptSignal" and on_actor_state_created or nil
 	if StateCreated then
 		StateCreated:Connect(HookActor)
@@ -367,15 +363,8 @@ function Hook:BypassAdonis()
 end				
 
 function Hook:BeginHooks()
-	--// Два режима, переключаются Configuration.UseOthHooks:
-	--// true  — oth (отдельный тред): детекторам не виден, но обход
-	--//         стека не видит игру → обе кнопки Decompile показывают
-	--//         один скрипт (fallback getcallingscript).
-	--// false — ПРЯМАЯ ЗАПИСЬ __namecall: обработчик на игровом треде,
-	--//         полная атрибуция (SourceScript/CallerScript различаются).
-	--//         Детекты Adonis нейтрализует BypassAdonis.
-	--// Оба режима распаковывают результат (Unpack) — без этого игра
-	--// получает таблицу вместо значений (зависание камеры).
+	if self.HooksLoaded then return end
+
 	local UseOth = typeof(oth) == "table" and typeof(oth.hook) == "function"
 		and (not Configuration or Configuration.UseOthHooks ~= false)
 
@@ -404,6 +393,9 @@ function Hook:BeginHooks()
 	Merge(self, {
 		OriginalNamecall = OriginalNameCall,
 	})
+
+	--// ставим только когда __namecall реально заменён
+	self.HooksLoaded = true
 end
 --// Скрытие функции из стека (Cobalt делает так для детуров).
 --// Executor без setstackhidden — просто пропускаем (pcall).

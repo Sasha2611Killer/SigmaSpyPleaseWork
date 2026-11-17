@@ -213,12 +213,7 @@ function Hook:IsSpyConnectionFunction(Function): boolean
 end
 
 function Hook:RunOnActors(Code: string, ChannelId: number)
-	print("[SigmaSpy] RunOnActors called")
-	print("[SigmaSpy] getactors =", typeof(getactors), "run_on_actor =", typeof(run_on_actor))
-	if not getactors or not run_on_actor then
-		print("[SigmaSpy] Actor API missing, skipping actor hooks")
-		return
-	end
+	if not getactors or not run_on_actor then return end
 
 	--// Cobalt-style ретрай: run_on_actor может падать на неинициализированных
 	--// акторах (LuaStateProxy) — повторяем до 10 раз с паузой
@@ -392,12 +387,9 @@ function Hook:BeginHooks()
 			local Method = getnamecallmethod()
 
 			local Ok, ReturnValues = pcall(ProcessRemote, OthOriginal, "__namecall", self, Method, ...)
-if not Ok then
-	print("[SigmaSpy] ProcessRemote error:", ReturnValues)
-end
-if Ok and ReturnValues then
-	return Process:Unpack(ReturnValues)
-end
+			if Ok and ReturnValues then
+				return Process:Unpack(ReturnValues)
+			end
 
 			return OthOriginal(self, ...)
 		end)

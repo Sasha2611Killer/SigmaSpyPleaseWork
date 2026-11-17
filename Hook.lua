@@ -282,48 +282,37 @@ local function ProcessRemote(OriginalFunc, MetaMethod: string, self, Method: str
 end
 
 function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
-	local Remote = Instance.new(ClassName)
-	local Func = Remote[FuncName]
-	local OriginalFunc
-	local Registry = GV.SIGMA_HOOKED_INDEXES	
-	if type(Registry) ~= "table" then
+	local Registry = GV.SIGMA_HOOKED_INDEXES
+	if typeof(Registry) ~= "table" then
 		Registry = {}
 		GV.SIGMA_HOOKED_INDEXES = Registry
 	end
 
-	--// Remotes will share the same functions
-	--// 	For example FireServer will be identical
-	--// Addionally, this is for __index calls.
-	--// 	A __namecall hook will not detect this
+	local Key = ClassName .. "|" .. FuncName
+	if Registry[Key] then return end
+
+	local Remote = Instance.new(ClassName)
+	local Func = Remote[FuncName]
+	if typeof(Func) ~= "function" then
+		pcall(function() Remote:Destroy() end)
+		return
+	end
+
+	Registry[Key] = true
+
+	local OriginalFunc
 	OriginalFunc = self:HookFunction(Func, function(self, ...)
-		if rawget(_G, "SIGMA_ACTOR_DEBUG") then
-			print("[SigmaSpy][Dbg] index call:", FuncName, typeof(self))
-		end
 		if not Process:RemoteAllowed(self, "Send", FuncName) then return end
 		return ProcessRemote(OriginalFunc, "__index", self, FuncName, ...)
 	end)
+
+	pcall(function() Remote:Destroy() end)
 end
 
 function Hook:HookRemoteIndexes()
 	for ClassName, Data in next, Process.RemoteClassData do
 		for _, Name in next, Data.Send do
 			pcall(self.HookRemoteTypeIndex, self, ClassName, Name)
-		end
-	end
-
-	--// добиваем реальные инстансы (у них может быть своя C-функция)
-	for _, Service in next, game:GetChildren() do
-		for _, Obj in next, Service:GetDescendants() do
-			local Data = Process.RemoteClassData[Obj.ClassName]
-			if not Data then continue end
-			for _, Name in next, Data.Send do
-				pcall(function()
-					self:HookFunction(Obj[Name], function(self, ...)
-						if not Process:RemoteAllowed(self, "Send", Name) then return end
-						return ProcessRemote(nil, "__index", self, Name, ...)
-					end)
-				end)
-			end
 		end
 	end
 end
@@ -376,6 +365,14 @@ end
 function Hook:BeginHooks()
 	if self.HooksLoaded then return end
 
+	--// Один набор хуков на VM: повторный run_on_actor не должен
+	--// ставить второй __namecall (Cobalt делает это через getgenv)
+	if GV.SIGMA_HOOKS_INSTALLED then
+		self.HooksLoaded = true
+		return
+	end
+	GV.SIGMA_HOOKS_INSTALLED = true
+
 	local UseOth = typeof(oth) == "table" and typeof(oth.hook) == "function"
 		and (not Configuration or Configuration.UseOthHooks ~= false)
 
@@ -407,11 +404,7 @@ function Hook:BeginHooks()
 
 	--// ставим только когда __namecall реально заменён
 	self:HookRemoteIndexes()
-	if GV.SIGMA_HOOKS_INSTALLED then
-		self.HooksLoaded = true
-		return
-	end
-	GV.SIGMA_HOOKS_INSTALLED = true
+	self.HooksLoaded = true
 end
 --// Скрытие функции из стека (Cobalt делает так для детуров).
 --// Executor без setstackhidden — просто пропускаем (pcall).
@@ -469,11 +462,6 @@ function Hook:MultiConnect(Remotes)
 end
 
 function Hook:ConnectClientRecive(Remote)
-	local Connected = GV.SIGMA_CONNECTED_RECIVES
-	if type(Connected) ~= "table" then
-		Connected = setmetatable({}, {__mode = "k"})
-		GV.SIGMA_CONNECTED_RECIVES = Connected
-	end							
 	--// Check if the Remote class is allowed for receiving
 	local Allowed = Process:RemoteAllowed(Remote, "Receive")
 	if not Allowed then return end
@@ -487,6 +475,20 @@ function Hook:ConnectClientRecive(Remote)
 	--// Check if the Recive should be hooked
 	if NoReciveHook then return end
 
+	--// Один коннект/детур на remote за всю VM
+	local Connected = GV.SIGMA_CONNECTED_RECIVES
+	if typeof(Connected) ~= "table" then
+		Connected = setmetatable({}, {__mode = "k"})
+		GV.SIGMA_CONNECTED_RECIVES = Connected
+	end
+
+	local ByMethod = Connected[Remote]
+	if not ByMethod then
+		ByMethod = {}
+		Connected[Remote] = ByMethod
+	end
+	if ByMethod[Method] then return end
+
 	--// New callback function (скрыт из стека, Cobalt-style)
 	local Callback = HideFromStack(function(...)
         return Process:ProcessRemote({
@@ -497,8 +499,7 @@ function Hook:ConnectClientRecive(Remote)
         }, Remote, ...)
 	end)
 
-	--// Env-токен (Cobalt-style): помечаем функцию как свою — токен живёт
-	--// в env и переживает clonefunction, в отличие от реестра по ссылке.
+	--// Env-токен (Cobalt-style): помечаем функцию как свою
 	local OriginalEnv = getfenv(Callback)
 	setfenv(Callback, setmetatable({
 		["__SigmaSpyLogger"] = SpyVerificationToken,
@@ -512,12 +513,18 @@ function Hook:ConnectClientRecive(Remote)
 
 	--// Connect remote
 	if not IsRemoteFunction then
-   		Remote[Method]:Connect(Callback)
-	else -- Remote functions
-		--// [ANTI-DETECT] Детур OnClientInvoke требует hookfunction на
-		--// игровой колбэк — детектится. В стелс-режиме пропускаем.
-		if Configuration and Configuration.StealthReceive then return end
-		self:HookClientInvoke(Remote, Method, Callback)
+		pcall(function()
+			Remote[Method]:Connect(Callback)
+		end)
+		ByMethod[Method] = true
+		return
+	end
+
+	--// Remote functions
+	if Configuration and Configuration.StealthReceive then return end
+
+	if self:HookClientInvoke(Remote, Method, Callback) then
+		ByMethod[Method] = true
 	end
 end
 

@@ -21,59 +21,31 @@ type RemoteData = {
 local Process = {
     --// Remote classes
     RemoteClassData = {
-        ["RemoteEvent"] = {
-            Send = {
-                "FireServer",
-                "fireServer",
-				"fireserver",
-            },
-            Receive = {
-                "OnClientEvent",
-            }
-        },
-        ["RemoteFunction"] = {
-            IsRemoteFunction = true,
-            Send = {
-                "InvokeServer",
-                "invokeServer",
-				"invokeserver",
-            },
-            Receive = {
-                "OnClientInvoke",
-            }
-        },
-        ["UnreliableRemoteEvent"] = {
-            Send = {
-                "FireServer",
-                "fireServer",
-				"fireserver",
-            },
-            Receive = {
-                "OnClientEvent",
-            }
-        },
-        ["BindableEvent"] = {
-            NoReciveHook = true,
-            Send = {
-                "Fire",
-				"fire",
-            },
-            Receive = {
-                "Event",
-            }
-        },
-        ["BindableFunction"] = {
-            IsRemoteFunction = true,
-            NoReciveHook = true,
-            Send = {
-                "Invoke",
-				"invoke",
-            },
-            Receive = {
-                "OnInvoke",
-            }
-        }
+    ["RemoteEvent"] = {
+        Send = { "FireServer" },
+        Receive = { "OnClientEvent" },
     },
+    ["RemoteFunction"] = {
+        IsRemoteFunction = true,
+        Send = { "InvokeServer" },
+        Receive = { "OnClientInvoke" },
+    },
+    ["UnreliableRemoteEvent"] = {
+        Send = { "FireServer" },
+        Receive = { "OnClientEvent" },
+    },
+    ["BindableEvent"] = {
+        NoReciveHook = true,
+        Send = { "Fire" },
+        Receive = { "Event" },
+    },
+    ["BindableFunction"] = {
+        IsRemoteFunction = true,
+        NoReciveHook = true,
+        Send = { "Invoke" },
+        Receive = { "OnInvoke" },
+    }
+},
     RemoteOptions = {},
     LoopingRemotes = {},
 

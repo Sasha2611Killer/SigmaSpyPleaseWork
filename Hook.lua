@@ -244,7 +244,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		local Ok, States = pcall(getactorstates)
 		if Ok and type(States) == "table" then
 			warn("[SigmaSpy] getactorstates:", #States, "first:", typeof(next(States)))
-			local First = next(States)
+			local _, First = next(States)
 			if type(First) == "thread" and typeof(run_on_thread) == "function" then
 				for _, State in States do
 					warn("[SigmaSpy] run_on_thread ->", pcall(run_on_thread, State, Code, ChannelId, nil))
@@ -404,6 +404,7 @@ function Hook:BeginHooks()
 	})
 
 	--// ставим только когда __namecall реально заменён
+	self:HookRemoteIndexes()
 	self.HooksLoaded = true
 end
 --// Скрытие функции из стека (Cobalt делает так для детуров).

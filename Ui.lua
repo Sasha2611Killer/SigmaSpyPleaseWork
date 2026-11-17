@@ -1665,13 +1665,17 @@ function Ui:QueueLog(Data)
 	local Tail = self.LogQueueTail + 1
 	self.LogQueueTail = Tail
 	self.LogQueue[Tail] = Data
+	print("[SigmaSpy] Queue accepted:", Data.Method, Data.Id)
 end
 
 function Ui:ProcessLogQueue()
+			print("[SigmaSpy] ProcessLogQueue head/tail:", self.LogQueueHead, self.LogQueueTail)
 	local Queue = self.LogQueue
 	local Head = self.LogQueueHead or 1
 	local Tail = self.LogQueueTail or 0
-	if Head > Tail then return end
+	if Head <= Tail then
+		print("[SigmaSpy] ProcessLogQueue processing:", Head, Tail)
+	end
 
 	--// [FIX] Было: for Index, Data in next, Queue + table.remove(Queue, Index)
 	--// — O(n^2), и из-за сдвига индексов через next обрабатывалась только
@@ -1729,6 +1733,7 @@ function Ui:FilterName(Name: string, CharacterLimit: number?): string
 end
 
 function Ui:CreateLog(Data: Log)
+				print("[SigmaSpy] CreateLog:", Data.Method, Data.Id, tostring(Data.Remote))
 	--// Guard: дропаем логи без валидного remote (см. QueueLog)
 	if typeof(Data.Remote) ~= "Instance" then
 		return

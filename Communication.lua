@@ -316,6 +316,10 @@ local function FlushBatch(self)
     end
 
     if BatchSize <= 0 then return end
+		
+	if rawget(_G, "SIGMA_ACTOR_DEBUG") then
+        print("[Dbg] flush:", BatchSize, string.format("t=%.2f", os.clock()))
+    end	
 
    local Ok, Err = pcall(self.Communicate, self, "QueueLog", Batch)
     if rawget(_G, "SIGMA_ACTOR_DEBUG") then

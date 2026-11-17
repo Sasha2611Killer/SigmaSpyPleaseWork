@@ -1587,6 +1587,7 @@ function Ui:ClearLogs()
 end
 
 function Ui:QueueLog(Data)
+			print("[SigmaSpy] Ui QueueLog:", Data and Data.Method, Data and Data.Id)
 	--// [FIX] Communication теперь шлёт БАТЧ (Cobalt-style), а не одиночный
 	--// лог. Раньше батч прилетал в Ui:QueueLog как один Data, guard ниже
 	--// видел Data.Remote == nil и молча выбрасывал ВСЁ. Принимаем оба вида.

@@ -309,9 +309,9 @@ function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
 end
 
 function Hook:HookRemoteIndexes()
-	for ClassName, Data in Process.RemoteClassData do
+	for ClassName, Data in next, Process.RemoteClassData do
 		for _, Name in next, Data.Send do
-			self:HookRemoteTypeIndex(ClassName, Name)
+			pcall(self.HookRemoteTypeIndex, self, ClassName, Name)
 		end
 	end
 

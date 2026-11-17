@@ -305,14 +305,31 @@ function Files:CompileModule(Scripts): string
 end
 
 function Files:MakeActorScript(Scripts, ChannelId: number): string
-	local ActorCode = Files:CompileModule(Scripts)
-	ActorCode ..= [[
-	local ExtraData = {
-		IsActor = true
-	}
-	]]
-	ActorCode ..= `Libraries.Hook:BeginService(Libraries, ExtraData, {ChannelId})`
-	return ActorCode
+    local ActorCode = Files:CompileModule(Scripts)
+
+    ActorCode ..= [[
+local ExtraData = { IsActor = true }
+local Act = ...
+if typeof(Act) ~= "Instance" then Act = nil end
+
+local Ok, Err = pcall(function()
+    Libraries.Hook:BeginService(Libraries, ExtraData, ]]
+    ActorCode ..= tostring(ChannelId)
+    ActorCode ..= [[)
+end)
+
+if not Ok then
+    pcall(warn, "[SigmaSpy][Actor] BeginService FAIL:", Err)
+    return
+end
+
+--// актор сам ставит хуки, не ждёт сообщения из main
+pcall(function()
+    Libraries.Hook:BeginHooks()
+end)
+]]
+
+    return ActorCode
 end
 
 return Files

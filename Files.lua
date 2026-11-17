@@ -305,31 +305,35 @@ function Files:CompileModule(Scripts): string
 end
 
 function Files:MakeActorScript(Scripts, ChannelId: number): string
-    local ActorCode = Files:CompileModule(Scripts)
+	local ActorCode = Files:CompileModule(Scripts)
 
-    ActorCode ..= [[
-local ExtraData = { IsActor = true }
-local Act = ...
-if typeof(Act) ~= "Instance" then Act = nil end
+	--// [FIX] Диагностика: если этот print не появился в F9 — payload
+	--// вообще не доехал до актора.
+	ActorCode = 'pcall(print, "[SigmaSpy][actor] PAYLOAD STARTED")\n' .. ActorCode
 
-local Ok, Err = pcall(function()
-    Libraries.Hook:BeginService(Libraries, ExtraData, ]]
-    ActorCode ..= tostring(ChannelId)
-    ActorCode ..= [[)
-end)
-
-if not Ok then
-    pcall(warn, "[SigmaSpy][Actor] BeginService FAIL:", Err)
-    return
-end
-
---// актор сам ставит хуки, не ждёт сообщения из main
-pcall(function()
-    Libraries.Hook:BeginHooks()
-end)
+	ActorCode ..= [[
+local ExtraData = {
+	IsActor = true
+}
 ]]
 
-    return ActorCode
+	--// [FIX] ChannelId вшивается ЛИТЕРАЛОМ. Delta run_on_actor/Execute
+	--// не передают varargs — третий аргумент игнорируется или ломает вызов.
+	ActorCode ..= `Libraries.Hook:BeginService(Libraries, ExtraData, {ChannelId})`
+
+	--// [FIX] Актор сам ставит хуки — не ждёт команды из main.
+	--// Убирает гонку: main мог прислать BeginHooks раньше, чем актор
+	--// зарегистрировал AddTypeCallback("BeginHooks").
+	ActorCode ..= [[
+
+pcall(function()
+	Libraries.Hook:BeginHooks()
+end)
+
+pcall(print, "[SigmaSpy][actor] BeginHooks done")
+]]
+
+	return ActorCode
 end
 
 return Files

@@ -317,25 +317,7 @@ local function FlushBatch(self)
 
     if BatchSize <= 0 then return end
 
-	if rawget(_G, "SIGMA_ACTOR_DEBUG") then
-        print("[Dbg] flush:", BatchSize, typeof(Channel))
-    end
-
-		if rawget(_G, "SIGMA_ACTOR_DEBUG") then
-		for i = 1, BatchSize do
-			local It = Batch[i]
-			print("[Dbg] send", i, It.Method, typeof(It.Remote), It.Id)
-		end
-	end
-
-   local Ok, Err = pcall(function()
-		local Packet = { "QueueLog", Batch }
-		for i = 1, BatchSize do
-			Packet[#Packet + 1] = Batch[i].Remote
-		end
-		self:Communicate(self, table.unpack(Packet))
-	end)
-
+   local Ok, Err = pcall(self.Communicate, self, "QueueLog", Batch)
     if rawget(_G, "SIGMA_ACTOR_DEBUG") then
         print("[Dbg] flush result:", Ok, Err)
     end

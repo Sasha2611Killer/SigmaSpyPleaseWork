@@ -455,6 +455,37 @@ function Hook:HookClientInvoke(Remote, Method, Callback)
 	return OkSet
 end
 
+function Hook:HookCallbackAssignments()
+	if GV.SIGMA_CALLBACK_NEWINDEX then return end
+	GV.SIGMA_CALLBACK_NEWINDEX = true
+
+	local Busy = false
+
+	local OriginalNewIndex = self:ReplaceMetaMethod(game, "__newindex", function(self, Key, Value)
+		if Key == "OnClientInvoke" and typeof(Value) == "function" and not Busy then
+			Busy = true
+
+			local Ok = pcall(function()
+				self.OnClientInvoke = function(...)
+					pcall(Process.ProcessRemote, Process, {
+						Method = "OnClientInvoke",
+						IsReceive = true,
+						MetaMethod = "newindex",
+						IsExploit = checkcaller(),
+					}, self, ...)
+
+					return Value(...)
+				end
+			end)
+
+			Busy = false
+			if Ok then return end
+		end
+
+		return OriginalNewIndex(self, Key, Value)
+	end)
+end													
+
 function Hook:MultiConnect(Remotes)
 	for _, Remote in next, Remotes do
 		self:ConnectClientRecive(Remote)

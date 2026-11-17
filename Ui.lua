@@ -1573,7 +1573,6 @@ function Ui:ClearLogs()
 
 	--// Ранний дедуп-счётчик тоже сбрасываем
 	self.DedupStore = nil
-	self.RemoteCache = nil
 
 	--// [FIX] Очередь отрисовки и лимиты тоже чистим, иначе после Clear
 	--// в очередь вываливались все накопленные спам-логи.
@@ -1588,7 +1587,9 @@ function Ui:ClearLogs()
 end
 
 function Ui:QueueLog(Data)
-	--// Принимаем и батч (массив), и одиночный лог
+	--// [FIX] Communication теперь шлёт БАТЧ (Cobalt-style), а не одиночный
+	--// лог. Раньше батч прилетал в Ui:QueueLog как один Data, guard ниже
+	--// видел Data.Remote == nil и молча выбрасывал ВСЁ. Принимаем оба вида.
 	if Data[1] ~= nil then
 		for Index = 1, #Data do
 			self:QueueLog(Data[Index])
@@ -1596,37 +1597,9 @@ function Ui:QueueLog(Data)
 		return
 	end
 
-	--// [FIX] Если Data.Remote не пережил переход через comm-канал Delta
-	--// (cloneref из actor-VM не узнаётся в main), восстанавливаем
-	--// по DebugId через getnilinstances. Кеш по Id — чтобы не сканить
-	--// дерево на каждый лог.
-	if typeof(Data.Remote) ~= "Instance" and Data.Id then
-		local Cache = self.RemoteCache
-		if not Cache then
-			Cache = {}
-			self.RemoteCache = Cache
-		end
-
-		local Cached = Cache[Data.Id]
-		if Cached and typeof(Cached) == "Instance" then
-			Data.Remote = Cached
-		else
-			local Ok, Instances = pcall(getnilinstances)
-			if Ok and type(Instances) == "table" then
-				for _, Inst in next, Instances do
-					if typeof(Inst) == "Instance" then
-						local OkId, DebugId = pcall(function() return Inst:GetDebugId() end)
-						if OkId and tostring(DebugId) == tostring(Data.Id) then
-							Data.Remote = Inst
-							Cache[Data.Id] = Inst
-							break
-						end
-					end
-				end
-			end
-		end
-	end
-
+	--// Guard: логи из actor-VM могут приходить с Remote == nil
+	--// (инстанс не пережил пересечение границы Lua-state через канал).
+	--// attempt to index nil with 'Parent' в CreateLog лечится здесь.
 	if typeof(Data.Remote) ~= "Instance" then
 		return
 	end
@@ -1635,6 +1608,9 @@ function Ui:QueueLog(Data)
 	local Id = Data.Id
 	local Method = Data.Method
 
+	--// [OPT] Дешёвые фильтры ДО тяжёлых копий аргументов. Раньше Paused /
+	--// LogRecives / Excluded отсекались только в CreateLog — то есть после
+	--// десериализации и двух DeepClone на КАЖДЫЙ вызов спамера.
 	if Flags:GetFlagValue("Paused") then return end
 	if Data.IsReceive and not Flags:GetFlagValue("LogRecives") then return end
 	if Data.IsExploit and not Flags:GetFlagValue("LogExploit") then return end
@@ -1645,6 +1621,10 @@ function Ui:QueueLog(Data)
 
 	if Process:GetRemoteData(Id).Excluded then return end
 
+	--// [OPT] Ранний дедуп (IgnoreDuplicates): сравниваем СЫРЫЕ
+	--// сериализованные аргументы до десериализации/DeepClone/UI.
+	--// Спамные вызовы умирают сразу на входе. Ключ — Id ремоута,
+	--// хранение по методам (пинг-понг send/receive не пропускает).
 	if Flags:GetFlagValue("IgnoreDuplicates") then
 		local Store = self.DedupStore
 		if not Store then
@@ -1664,6 +1644,9 @@ function Ui:QueueLog(Data)
 		ById[Method] = Data.Args
 	end
 
+	--// [FIX] Per-remote лимит ожидающих. Флуд одного remote упирается
+	--// в собственный счётчик и НЕ вытесняет логи остальных remote.
+	--// Аналог cobalt'овского Log:IsOverSpamThreshold.
 	local Pending = self.PendingByRemote
 	local Count = Pending[Id] or 0
 	if Count >= self.MaxPendingPerRemote then
@@ -1672,6 +1655,8 @@ function Ui:QueueLog(Data)
 	end
 	Pending[Id] = Count + 1
 
+	--// Args оставляем сериализованными: свежую таблицу всё равно создаёт
+	--// DeserializeTable в CreateLog. Лишний DeepClone на каждый лог убран.
 	if Data.ReturnValues then
 		Data.ReturnValues = Process:DeepCloneTable(Data.ReturnValues)
 	end

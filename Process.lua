@@ -146,13 +146,13 @@ end
 function Process:CheckValue(Value, Ignore: table?, Cache: table?)
     local Type = typeof(Value)
 
-    if Type == "table" then
+     if Type == "table" then
         Value = self:DeepCloneTable(Value, Ignore, Cache)
     elseif Type == "Instance" then
         local Ok, Cloned = pcall(cloneref, Value)
         Value = Ok and Cloned or Value
     end
-
+	
     return Value
 end
 
@@ -624,6 +624,10 @@ local ProcessCallback = newcclosure(function(Data: RemoteData, Remote, ...): tab
 end)
 
 function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
+	if rawget(_G, "SIGMA_ACTOR_DEBUG") then
+		print("[Dbg] ProcessRemote:", Data.Method, typeof(Remote))
+	end
+									
 	local Method = Data.Method
     local TransferType = Data.TransferType
     local IsReceive = Data.IsReceive
@@ -700,7 +704,10 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
 
     local CallingScript = getcallingscript()
     self:Merge(Data, {
-        Remote = cloneref(Remote),
+        Remote = (function(R)
+            local Ok, Cloned = pcall(cloneref, R)
+            return Ok and Cloned or R
+        end)(Remote),
 		CallingScript = CallingScript,
         CallingFunction = CallingFunction,
         --// Fallback: если стек пуст — getcallingscript() (владелец потока)

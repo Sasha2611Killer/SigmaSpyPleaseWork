@@ -29,6 +29,7 @@ local Config
 local Communication
 
 local ExeENV = getfenv(1)
+local GV = (typeof(getgenv) == "function" and getgenv()) or _G
 
 --// Верификационный токен для разметки собственных колбэков (Cobalt-style):
 --// игровые переборщики getconnections не могут отличить наш логгер,
@@ -284,6 +285,11 @@ function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
 	local Remote = Instance.new(ClassName)
 	local Func = Remote[FuncName]
 	local OriginalFunc
+	local Registry = GV.SIGMA_HOOKED_INDEXES	
+	if type(Registry) ~= "table" then
+		Registry = {}
+		GV.SIGMA_HOOKED_INDEXES = Registry
+	end
 
 	--// Remotes will share the same functions
 	--// 	For example FireServer will be identical
@@ -401,7 +407,11 @@ function Hook:BeginHooks()
 
 	--// ставим только когда __namecall реально заменён
 	self:HookRemoteIndexes()
-	self.HooksLoaded = true
+	if GV.SIGMA_HOOKS_INSTALLED then
+		self.HooksLoaded = true
+		return
+	end
+	GV.SIGMA_HOOKS_INSTALLED = true
 end
 --// Скрытие функции из стека (Cobalt делает так для детуров).
 --// Executor без setstackhidden — просто пропускаем (pcall).
@@ -459,6 +469,11 @@ function Hook:MultiConnect(Remotes)
 end
 
 function Hook:ConnectClientRecive(Remote)
+	local Connected = GV.SIGMA_CONNECTED_RECIVES
+	if type(Connected) ~= "table" then
+		Connected = setmetatable({}, {__mode = "k"})
+		GV.SIGMA_CONNECTED_RECIVES = Connected
+	end							
 	--// Check if the Remote class is allowed for receiving
 	local Allowed = Process:RemoteAllowed(Remote, "Receive")
 	if not Allowed then return end

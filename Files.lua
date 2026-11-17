@@ -286,6 +286,9 @@ function Files:MakeActorScript(Scripts, ChannelId: number): string
 		end)
 
 		Libraries.Hook:BeginHooks()
+				pcall(function()
+		Libraries.Hook:LoadReceiveHooks()
+	end)
 		Say("BeginHooks OK")
 	end)
 

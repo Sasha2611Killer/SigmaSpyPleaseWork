@@ -395,18 +395,27 @@ function Module:ChannelIndex(Channel, Property: string)
 end
 
 function Module:Communicate(...)
-	local Fire = self:ChannelIndex(Channel, "Fire")
+    local IsInstance = typeof(Channel) == "Instance"
+    local Fire = self:ChannelIndex(Channel, "Fire")
 
-	if typeof(getthreadidentity) ~= "function" or typeof(setthreadidentity) ~= "function" then
-		Fire(Channel, ...)
-		return
-	end
+    if not IsInstance then
+        --// CommWrapper: Fire(...) — self = Channel (Wrapped), аргументы — ...
+        local Ok, Err = pcall(Fire, Channel, ...)
+        if not Ok then error(Err, 0) end
+        return
+    end
 
-	local Identity = getthreadidentity()
-	local Raised = pcall(setthreadidentity, 8)
-	local Ok, Err = pcall(Fire, Channel, ...)
-	if Raised then pcall(setthreadidentity, Identity) end
-	if not Ok then error(Err, 0) end
+    --// Instance: Fire(Channel, ...)
+    if typeof(getthreadidentity) ~= "function" or typeof(setthreadidentity) ~= "function" then
+        Fire(Channel, ...)
+        return
+    end
+
+    local Identity = getthreadidentity()
+    local Raised = pcall(setthreadidentity, 8)
+    local Ok, Err = pcall(Fire, Channel, ...)
+    if Raised then pcall(setthreadidentity, Identity) end
+    if not Ok then error(Err, 0) end
 end
 	
 function Module:AddConnection(Callback): RBXScriptConnection

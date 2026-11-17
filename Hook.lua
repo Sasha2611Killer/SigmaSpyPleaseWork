@@ -583,24 +583,33 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 	local Channel, IsWrapped = Communication:GetCommChannel(ChannelId)
 	Communication:SetChannel(Channel)
 	Communication:AddTypeCallbacks({
-		["RemoteData"] = function(Id: string, RemoteData)
-			ProcessLib:SetRemoteData(Id, RemoteData)
-		end,
-		["AllRemoteData"] = function(Key: string, Value)
-			ProcessLib:SetAllRemoteData(Key, Value)
-		end,
-		["UpdateSpoofs"] = function(Content: string)
-			local Spoofs = loadstring(Content)()
-			ProcessLib:SetNewReturnSpoofs(Spoofs)
-		end,
-		["BeginHooks"] = function(Config)
-			if Config.PatchFunctions then
-				self:PatchFunctions()
-			end
-			self:BeginHooks()
-			Communication:ConsolePrint("Hooks loaded")
-		end
-	})
+    ["RemoteData"] = function(Id: string, RemoteData)
+        ProcessLib:SetRemoteData(Id, RemoteData)
+    end,
+    ["AllRemoteData"] = function(Key: string, Value)
+        ProcessLib:SetAllRemoteData(Key, Value)
+    end,
+    ["UpdateSpoofs"] = function(Content: string)
+        local Spoofs = loadstring(Content)()
+        ProcessLib:SetNewReturnSpoofs(Spoofs)
+    end,
+    --// [FIX] Приём батча логов из actor-VM (и из главного VM,
+    --// если логи идут через канал). Без этого "QueueLog" от
+    --// Communication:FlushBatch молча выбрасывался, и логи
+    --// акторов не доходили до UI.
+    ["QueueLog"] = function(Batch)
+        local Ui = Modules.Ui
+        if not Ui then return end
+        Ui:QueueLog(Batch)
+    end,
+    ["BeginHooks"] = function(Config)
+        if Config.PatchFunctions then
+            self:PatchFunctions()
+        end
+        self:BeginHooks()
+        Communication:ConsolePrint("Hooks loaded")
+    end
+})
 	
 	--// Process configuration
 	ProcessLib:SetChannel(Channel, IsWrapped)

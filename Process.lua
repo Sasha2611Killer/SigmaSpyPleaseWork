@@ -740,6 +740,15 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         Args = {...}
     })
 
+   if ClassData and ClassData.IsRemoteFunction and not IsReceive then
+        Communication:QueueLog(Data)
+
+        local ReturnValues = ProcessCallback(Data, Remote, ...)
+        Data.ReturnValues = ReturnValues
+
+        return ReturnValues
+    end
+
     local ReturnValues = ProcessCallback(Data, Remote, ...)
     Data.ReturnValues = ReturnValues
 

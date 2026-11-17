@@ -316,16 +316,8 @@ local function FlushBatch(self)
     end
 
     if BatchSize <= 0 then return end
-		
-	if rawget(_G, "SIGMA_ACTOR_DEBUG") then
-        print("[Dbg] flush:", BatchSize, string.format("t=%.2f", os.clock()))
-    end	
 
-   local Ok, Err = pcall(self.Communicate, self, "QueueLog", Batch)
-    if rawget(_G, "SIGMA_ACTOR_DEBUG") then
-        print("[Dbg] flush result:", Ok, Err)
-    end
-		
+    local Ok, Err = pcall(self.Communicate, self, "QueueLog", Batch)
     if not Ok then
         -- не warn: строка ошибки может содержать имена функций из списка АС
         self:ConsolePrint("QueueLog error:", tostring(Err):sub(1, 120))
@@ -340,13 +332,14 @@ EnsureFlusher = function(self)
     FlusherStarted = true
 
     task.spawn(function()
-		 while true do
+        while true do
             if LogQueueHead <= LogQueueTail then
-                pcall(FlushBatch, self)
+                FlushBatch(self)
             end
-			task.wait()
-		end
-	end)
+            --// 1 батч на кадр (у Cobalt это Heartbeat)
+            task.wait()
+        end
+    end)
 end
 
 function Module:QueueLog(Data)
@@ -366,9 +359,6 @@ function Module:QueueLog(Data)
 
     LogQueueTail += 1
     LogQueue[LogQueueTail] = Data
-	 if rawget(_G, "SIGMA_ACTOR_DEBUG") then
-        print("[Dbg] queue:", Data.Method, Id)
-    end
 end
 
 --// Сколько вызовов отброшено лимитом (для UI/консоли)
@@ -405,29 +395,13 @@ function Module:ChannelIndex(Channel, Property: string)
 end
 
 function Module:Communicate(...)
-    local IsInstance = typeof(Channel) == "Instance"
     local Fire = self:ChannelIndex(Channel, "Fire")
-
-    if not IsInstance then
-        --// CommWrapper: Fire(...) — self = Channel (Wrapped), аргументы — ...
-        local Ok, Err = pcall(Fire, Channel, ...)
-        if not Ok then error(Err, 0) end
-        return
-    end
-
-    --// Instance: Fire(Channel, ...)
-    if typeof(getthreadidentity) ~= "function" or typeof(setthreadidentity) ~= "function" then
-        Fire(Channel, ...)
-        return
-    end
-
-    local Identity = getthreadidentity()
-    local Raised = pcall(setthreadidentity, 8)
-    local Ok, Err = pcall(Fire, Channel, ...)
-    if Raised then pcall(setthreadidentity, Identity) end
-    if not Ok then error(Err, 0) end
+    local identity = getthreadidentity()
+    setthreadidentity(8)
+    Fire(Channel, ...)
+    setthreadidentity(identity)
 end
-	
+
 function Module:AddConnection(Callback): RBXScriptConnection
     local Event = self:ChannelIndex(Channel, "Event")
     return Event:Connect(Callback)

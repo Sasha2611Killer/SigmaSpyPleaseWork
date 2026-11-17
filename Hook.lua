@@ -210,32 +210,19 @@ function Hook:IsSpyConnectionFunction(Function): boolean
 end
 
 function Hook:RunOnActors(Code: string, ChannelId: number)
-	if not getactors then
-		warn("[SigmaSpy] getactors ОТСУТСТВУЕТ — акторы невозможны")
-		return
-	end
-	if not run_on_actor then
-		warn("[SigmaSpy] run_on_actor ОТСУТСТВУЕТ — акторы невозможны")
-		return
-	end
+	if not getactors or not run_on_actor then return end
 
-	local Actors = getactors()
-	warn("[SigmaSpy] getactors:", #Actors, "run_on_actor:", typeof(run_on_actor))
-
-	local function HookActor(Actor)
+	local function HookActor(Actor, Source: string?)
 		if typeof(Actor) ~= "Instance" then return end
 		task.spawn(function()
 			local Hooked = false
 			local Attempts = 0
-			local LastErr
 			repeat
 				Hooked = pcall(run_on_actor, Actor, Code, ChannelId, Actor)
 				Attempts += 1
-				if not Hooked then
-					task.wait(0.25)
-				end
+				if not Hooked then task.wait(0.25) end
 			until Hooked or Attempts > 10
-			warn("[SigmaSpy] run_on_actor", Actor and Actor:GetFullName() or "?", "->", Hooked, "attempts:", Attempts)
+			warn("[Spy] inject path=", Source or "classic", "actor=", Actor:GetFullName(), "ok=", Hooked)
 		end)
 	end
 
@@ -243,22 +230,25 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 	if typeof(getactorstates) == "function" then
 		local Ok, States = pcall(getactorstates)
 		if Ok and type(States) == "table" then
-			warn("[SigmaSpy] getactorstates:", #States, "first:", typeof(next(States)))
+			for k, v in next, States do
+				warn("[Spy] state", k, typeof(k), "value:", typeof(v), "IsActorState:", v and v.IsActorState)
+			end
+
 			local _, First = next(States)
 			if type(First) == "thread" and typeof(run_on_thread) == "function" then
 				for _, State in States do
-					warn("[SigmaSpy] run_on_thread ->", pcall(run_on_thread, State, Code, ChannelId, nil))
+					warn("[Spy] inject path=thread", pcall(run_on_thread, State, Code, ChannelId, nil))
 				end
 				SkipClassic = true
-			elseif (type(First) == "userdata" or type(First) == "table") and First.IsActorState then
+			elseif First and First.IsActorState then
 				local HookedAny = false
 				for _, Proxy in States do
 					if not Proxy.IsActorState then continue end
-					local Actors2 = Proxy:GetActors()
+					local Actors = Proxy:GetActors()
 					local OkH, Err = pcall(function()
-						return Proxy:Execute(Code, ChannelId, Actors2[1])
+						return Proxy:Execute(Code, ChannelId, Actors[1])
 					end)
-					warn("[SigmaSpy] Proxy:Execute ->", OkH, Err)
+					warn("[Spy] inject path=proxy", "actor=", Actors[1], "ok=", OkH, Err)
 					HookedAny = HookedAny or OkH
 				end
 				if HookedAny then
@@ -269,7 +259,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 	end
 
 	if not SkipClassic then
-		for _, Category in {Actors, typeof(getdeletedactors) == "function" and getdeletedactors() or {}} do
+		for _, Category in {getactors(), typeof(getdeletedactors) == "function" and getdeletedactors() or {}} do
 			if Category then
 				for _, Actor in next, Category do
 					HookActor(Actor)
@@ -280,11 +270,11 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 
 	local StateCreated = typeof(on_actor_state_created) == "RBXScriptSignal" and on_actor_state_created or nil
 	if StateCreated then
-		StateCreated:Connect(HookActor)
+		StateCreated:Connect(function(Actor) HookActor(Actor, "state_created") end)
 	else
 		game.DescendantAdded:Connect(function(Instance)
 			if typeof(Instance) == "Instance" and Instance:IsA("Actor") then
-				HookActor(Instance)
+				HookActor(Instance, "descendant")
 			end
 		end)
 	end

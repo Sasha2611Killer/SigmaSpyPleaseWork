@@ -253,13 +253,30 @@ function Files:CompileModule(Scripts): string
 end
 
 function Files:MakeActorScript(Scripts, ChannelId: number): string
-	local ActorCode = Files:CompileModule(Scripts)
+	local ActorCode = self:CompileModule(Scripts)
+
+	--// ChannelId зашиваем литералом: run_on_actor/run_on_thread/Proxy:Execute
+	--// не везде пробрасывают varargs в actor-чанк -> актор не находил канал
+	--// (GetCommChannel получал таблицу/nil) и молча ничего не присылал.
+	ActorCode ..= "\nlocal ChannelId = ...\n"
+	ActorCode ..= `if type(ChannelId) ~= "number" then ChannelId = {tostring(ChannelId)} end\n`
 	ActorCode ..= [[
+	local CurrentActor = select(2, ...)
+	if typeof(CurrentActor) ~= "Instance" and typeof(get_current_actor) == "function" then
+		local Ok, Resolved = pcall(get_current_actor)
+		if Ok and typeof(Resolved) == "Instance" then
+			CurrentActor = Resolved
+		end
+	end
+
 	local ExtraData = {
-		IsActor = true
+		IsActor = true,
+		Actor = typeof(CurrentActor) == "Instance" and CurrentActor or nil,
 	}
 	]]
-	ActorCode ..= `Libraries.Hook:BeginService(Libraries, ExtraData, {ChannelId})`
+	ActorCode ..= `Libraries.Hook:BeginService(Libraries, ExtraData, ChannelId)\n`
+	ActorCode ..= `Libraries.Hook:BeginHooks()\n`
+
 	return ActorCode
 end
 

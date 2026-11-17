@@ -332,14 +332,14 @@ EnsureFlusher = function(self)
     FlusherStarted = true
 
     task.spawn(function()
-        while true do
-            if LogQueueHead <= LogQueueTail then
-                FlushBatch(self)
-            end
-            --// 1 батч на кадр (у Cobalt это Heartbeat)
-            task.wait()
-        end
-    end)
+		while true do
+			if LogQueueHead <= LogQueueTail then
+				--// один битый батч не должен убивать флушер навсегда
+				pcall(FlushBatch, self)
+			end
+			task.wait()
+		end
+	end)
 end
 
 function Module:QueueLog(Data)
@@ -395,13 +395,20 @@ function Module:ChannelIndex(Channel, Property: string)
 end
 
 function Module:Communicate(...)
-    local Fire = self:ChannelIndex(Channel, "Fire")
-    local identity = getthreadidentity()
-    setthreadidentity(8)
-    Fire(Channel, ...)
-    setthreadidentity(identity)
-end
+	local Fire = self:ChannelIndex(Channel, "Fire")
 
+	if typeof(getthreadidentity) ~= "function" or typeof(setthreadidentity) ~= "function" then
+		Fire(Channel, ...)
+		return
+	end
+
+	local Identity = getthreadidentity()
+	local Raised = pcall(setthreadidentity, 8)
+	local Ok, Err = pcall(Fire, Channel, ...)
+	if Raised then pcall(setthreadidentity, Identity) end
+	if not Ok then error(Err, 0) end
+end
+	
 function Module:AddConnection(Callback): RBXScriptConnection
     local Event = self:ChannelIndex(Channel, "Event")
     return Event:Connect(Callback)

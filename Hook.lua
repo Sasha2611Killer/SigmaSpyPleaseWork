@@ -215,6 +215,8 @@ end
 function Hook:RunOnActors(Code: string, ChannelId: number)
 	if not getactors or not run_on_actor then return end
 
+	--// Cobalt-style ретрай: run_on_actor может падать на неинициализированных
+	--// акторах (LuaStateProxy) — повторяем до 10 раз с паузой
 	local function HookActor(Actor)
 		task.spawn(function()
 			local Hooked = false
@@ -226,75 +228,41 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 					task.wait(0.25)
 				end
 			until Hooked or Attempts > 10
-			if not Hooked then
-				Communication:ConsolePrint(
-					`[RunOnActors] run_on_actor FAILED on {tostring(Actor)} after {Attempts} attempts`
-				)
-			end
 		end)
 	end
 
+	--// Современная библиотека: getactorstates может возвращать НЕ Actor-инстансы,
+	--// а состояния — треды (run_on_thread) или LuaStateProxy (:Execute).
+	--// Классический getactors() такие акторы не видит.
 	local SkipClassic = false
 	if typeof(getactorstates) == "function" then
 		local Ok, States = pcall(getactorstates)
-		if Ok and type(States) == "table" and next(States) ~= nil then
+		if Ok and type(States) == "table" then
 			local First = next(States)
-
 			if type(First) == "thread" and typeof(run_on_thread) == "function" then
-				local HookedAny = false
 				for _, State in States do
-					local OkT, Res = pcall(run_on_thread, State, Code, ChannelId)
-					--// [FIX] успех только если run_on_thread явно вернул true
-					--// (или хотя бы не false/nil) — pcall сам по себе не показатель
-					if OkT and Res ~= false and Res ~= nil then
-						HookedAny = true
-					end
+					pcall(run_on_thread, State, Code, ChannelId)
 				end
-				if HookedAny then
-					SkipClassic = true
-				else
-					Communication:ConsolePrint(
-						"[RunOnActors] run_on_thread did not confirm hook — falling back to classic"
-					)
-				end
-
+				SkipClassic = true -- состояния захуканы — getactors-проход не нужен
 			elseif (type(First) == "userdata" or type(First) == "table") and First.IsActorState then
 				local HookedAny = false
 				for _, Proxy in States do
 					if not Proxy.IsActorState then continue end
-					if typeof(Proxy.Execute) ~= "function"
-						or typeof(Proxy.GetActors) ~= "function"
-					then
-						continue
-					end
-					local OkH, Res = pcall(function()
+					local OkH = pcall(function()
 						return Proxy:Execute(Code, ChannelId, Proxy:GetActors()[1])
 					end)
-					--// [FIX] Execute должен вернуть истину, а не просто не упасть
-					if OkH and Res ~= false and Res ~= nil then
-						HookedAny = true
-					end
+					HookedAny = HookedAny or OkH
 				end
 				if HookedAny then
 					SkipClassic = true
-				else
-					Communication:ConsolePrint(
-						"[RunOnActors] LuaStateProxy:Execute did not confirm hook — falling back to classic"
-					)
 				end
 			end
 		end
 	end
 
-	--// [FIX] Классика идёт всегда, если getactors() непустой —
-	--// даже при SkipClassic = true. run_on_actor идемпотентен по коду,
-	--// повторный запуск безвреден, а пропуск = акторы не захуканы.
-	local ClassicActors = getactors()
-	local HasClassicActors = ClassicActors ~= nil and next(ClassicActors) ~= nil
-
-	if not SkipClassic or HasClassicActors then
-		local Deleted = typeof(getdeletedactors) == "function" and getdeletedactors() or {}
-		for _, Category in {ClassicActors, Deleted} do
+	--// Текущие + удалённые (неинициализированные) акторы — как в Cobalt
+	if not SkipClassic then
+		for _, Category in {getactors(), typeof(getdeletedactors) == "function" and getdeletedactors() or {}} do
 			if Category then
 				for _, Actor in next, Category do
 					HookActor(Actor)
@@ -303,8 +271,9 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
-	local StateCreated = typeof(on_actor_state_created) == "RBXScriptSignal"
-		and on_actor_state_created or nil
+	--// Акторы, созданные ПОЗЖЕ: нативное событие → fallback DescendantAdded.
+	--// В старой версии такие акторы вообще не хукались.
+	local StateCreated = typeof(on_actor_state_created) == "RBXScriptSignal" and on_actor_state_created or nil
 	if StateCreated then
 		StateCreated:Connect(HookActor)
 	else
@@ -583,33 +552,24 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 	local Channel, IsWrapped = Communication:GetCommChannel(ChannelId)
 	Communication:SetChannel(Channel)
 	Communication:AddTypeCallbacks({
-    ["RemoteData"] = function(Id: string, RemoteData)
-        ProcessLib:SetRemoteData(Id, RemoteData)
-    end,
-    ["AllRemoteData"] = function(Key: string, Value)
-        ProcessLib:SetAllRemoteData(Key, Value)
-    end,
-    ["UpdateSpoofs"] = function(Content: string)
-        local Spoofs = loadstring(Content)()
-        ProcessLib:SetNewReturnSpoofs(Spoofs)
-    end,
-    --// [FIX] Приём батча логов из actor-VM (и из главного VM,
-    --// если логи идут через канал). Без этого "QueueLog" от
-    --// Communication:FlushBatch молча выбрасывался, и логи
-    --// акторов не доходили до UI.
-    ["QueueLog"] = function(Batch)
-        local Ui = Modules.Ui
-        if not Ui then return end
-        Ui:QueueLog(Batch)
-    end,
-    ["BeginHooks"] = function(Config)
-        if Config.PatchFunctions then
-            self:PatchFunctions()
-        end
-        self:BeginHooks()
-        Communication:ConsolePrint("Hooks loaded")
-    end
-})
+		["RemoteData"] = function(Id: string, RemoteData)
+			ProcessLib:SetRemoteData(Id, RemoteData)
+		end,
+		["AllRemoteData"] = function(Key: string, Value)
+			ProcessLib:SetAllRemoteData(Key, Value)
+		end,
+		["UpdateSpoofs"] = function(Content: string)
+			local Spoofs = loadstring(Content)()
+			ProcessLib:SetNewReturnSpoofs(Spoofs)
+		end,
+		["BeginHooks"] = function(Config)
+			if Config.PatchFunctions then
+				self:PatchFunctions()
+			end
+			self:BeginHooks()
+			Communication:ConsolePrint("Hooks loaded")
+		end
+	})
 	
 	--// Process configuration
 	ProcessLib:SetChannel(Channel, IsWrapped)

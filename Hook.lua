@@ -320,8 +320,9 @@ end
 
 function Hook:HookRemoteIndexes()
 	for ClassName, Data in Process.RemoteClassData do
-		local FuncName = Data.Send[1]
-		self:HookRemoteTypeIndex(ClassName, FuncName)
+		for _, Name in next, Data.Send do
+			self:HookRemoteTypeIndex(ClassName, Name)
+		end
 	end
 
 	--// добиваем реальные инстансы (у них может быть своя C-функция)

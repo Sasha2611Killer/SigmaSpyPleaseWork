@@ -343,6 +343,7 @@ EnsureFlusher = function(self)
 end
 
 function Module:QueueLog(Data)
+		print("[SigmaSpy] QueueLog:", Data.Method, Data.Id)
     --// [FIX] Только enqueue. Никаких Fire, spawn и сериализации в хуке.
     local Id = Data.Id or 0
     local MaxPending = GetLimit("MaxPendingPerRemote", 24)

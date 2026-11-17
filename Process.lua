@@ -686,9 +686,12 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         self:Merge(Data, ExtraData)
     end
 
-    --// SourceScript = первый Lua-фрейм с валидным Instance (ClientCore).
-    --// CallerScript = первый хинт/скрипт, отличный от SourceScript
-    --// (C-фрейм на Delta несёт env.script загрузчика = Framework).
+    --// [FIX] IsExploit в акторе ДОЛЖЕН быть false.
+    --// checkcaller() в actor-VM возвращает true (мы — executor в actor-VM),
+    --// из-за чего Ui:QueueLog → CreateLog дропал лог по флагу LogExploit=false.
+    local IsActor = type(ExtraData) == "table" and ExtraData.IsActor == true
+    local IsExploit = checkcaller() and not IsActor
+
     if not IsReceive then
         local Closures, Hints = self:FindCallingClosures(6)
 
@@ -704,7 +707,6 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         end
 
         if SourceIndex then
-            --// 1) хинты (C-фреймы: владелец потока/загрузчик)
             for _, Hint in Hints do
                 if typeof(Hint) == "Instance" and Hint ~= SourceScript then
                     CallerScript = Hint
@@ -712,7 +714,6 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
                 end
             end
 
-            --// 2) fallback: скрипт следующего Lua-фрейма
             if not CallerScript then
                 for i = SourceIndex + 1, #Closures do
                     local S = self:GetScriptFromFunc(Closures[i])
@@ -731,12 +732,12 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         Remote = cloneref(Remote),
 		CallingScript = CallingScript,
         CallingFunction = CallingFunction,
-        --// Fallback: если стек пуст — getcallingscript() (владелец потока)
         SourceScript = SourceScript or CallingScript,
         CallerScript = CallerScript,
         Id = Id,
 		ClassData = ClassData,
         Timestamp = Timestamp,
+        IsExploit = IsExploit,
         Args = {...}
     })
 

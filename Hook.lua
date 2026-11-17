@@ -259,8 +259,6 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end)
 
-	--// Ключ по полному имени, а не по ссылке: Delta отдаёт новый Instance-обёртку
-	--// на каждый getactors(), из-за чего один и тот же актор запускался 8 раз.
 	local HookedKeys = {}
 	local HookedCount = 0
 	local Seen = 0
@@ -272,6 +270,11 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		return tostring(Actor)
 	end
 
+	--// [FIX] Delta run_on_actor НЕ принимает varargs: третий аргумент
+	--// ChannelId → возврат false, код НЕ выполняется. Проверено:
+	--//   run_on_actor(Actor, "print('actor alive')") → true, true, "actor alive"
+	--//   run_on_actor(Actor, payload, ChannelId)      → true, false
+	--// ChannelId уже вшит литералом внутрь payload через Files:MakeActorScript.
 	local function TryActor(Actor, Quiet)
 		if typeof(Actor) ~= "Instance" or not Actor:IsA("Actor") then return false end
 
@@ -279,10 +282,10 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		if HookedKeys[Key] then return true end
 		Seen += 1
 
-		--// имя актора уезжает внутрь кода — в консоли видно, кто подключился
 		local Payload = ActorCodeWrapper:format(("%q"):format(Key), Code)
 
-		local Ok, Ret = pcall(run_on_actor, Actor, Payload, ChannelId)
+		--// БЕЗ ChannelId — он вшит в Payload
+		local Ok, Ret = pcall(run_on_actor, Actor, Payload)
 		if Ok and Ret ~= false then
 			HookedKeys[Key] = true
 			HookedCount += 1
@@ -298,7 +301,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		return false
 	end
 
-	--// 1) акторы из игры — у Delta только они имеют готовую VM
+	--// 1) акторы из игры
 	local OkGet, Actors = pcall(getactors)
 	local GameActors = (OkGet and typeof(Actors) == "table") and Actors or {}
 	Log(("actors: getactors = %d"):format(#GameActors))
@@ -306,7 +309,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		TryActor(Actor, false)
 	end
 
-	--// удалённые акторы почти всегда уже без VM — пробуем тихо
+	--// удалённые акторы
 	if typeof(getdeletedactors) == "function" then
 		local OkDel, Deleted = pcall(getdeletedactors)
 		if OkDel and typeof(Deleted) == "table" and #Deleted > 0 then
@@ -317,7 +320,9 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
-	--// 2) если классический путь не дал ничего — состояния акторов
+	--// 2) состояния акторов (Delta: LuaStateProxy:Execute)
+	--// [FIX] Execute НЕ принимает (ChannelId, Actor) — только Payload.
+	--// ChannelId вшит в payload. Actor тоже не нужен.
 	if HookedCount == 0 and typeof(getactorstates) == "function" then
 		local OkStates, States = pcall(getactorstates)
 		if OkStates and typeof(States) == "table" then
@@ -326,18 +331,18 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 			for _, State in next, States do
 				if type(State) == "thread" then
 					if typeof(run_on_thread) == "function" then
-						local OkRun, RetRun = pcall(run_on_thread, State, StatePayload, ChannelId)
+						local OkRun, RetRun = pcall(run_on_thread, State, StatePayload)
 						Log(("actor state (thread): run_on_thread ok=%s ret=%s")
 							:format(tostring(OkRun), tostring(RetRun)))
 					end
 					continue
 				end
 
-				--// поле может отсутствовать (userdata/proxy) — проверяем безопасно
 				local OkIs, IsState = pcall(function() return State.IsActorState end)
 				if OkIs and IsState then
+					--// БЕЗ ChannelId и Actor — только Payload
 					local OkExec, RetExec = pcall(function()
-						return State:Execute(StatePayload, ChannelId, State:GetActors()[1])
+						return State:Execute(StatePayload)
 					end)
 					Log(("actor state: Execute ok=%s ret=%s")
 						:format(tostring(OkExec), tostring(RetExec)))
@@ -348,7 +353,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
-	--// 3) актор мог получить VM позже — повторная проверка, без повторов запуска
+	--// 3) актор мог получить VM позже
 	if HookedCount == 0 then
 		task.spawn(function()
 			for _ = 1, 10 do
@@ -373,7 +378,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end)
 	end
 
-	--// 4) новые акторы после запуска (на Delta on_actor_state_created = nil)
+	--// 4) новые акторы после запуска
 	game.DescendantAdded:Connect(function(Instance)
 		if typeof(Instance) == "Instance" and Instance:IsA("Actor") then
 			task.delay(0.5, function()
@@ -382,7 +387,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end)
 
-	--// 5) ошибки из VM актора по каналу не приходят — читаем файл
+	--// 5) ошибки из VM актора
 	if typeof(isfile) == "function" and typeof(readfile) == "function" then
 		task.delay(2, function()
 			local OkFile, Content = pcall(function()
@@ -403,7 +408,6 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		Warn(("actors: сразу не принял ни один из %d, жду появления VM"):format(Seen))
 	end
 end
-
 local FirstActorRemoteLogged = false
 local function ProcessRemote(OriginalFunc, MetaMethod: string, self, Method: string, ...)
 	local Result = Process:ProcessRemote({

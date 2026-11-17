@@ -255,28 +255,44 @@ end
 function Files:MakeActorScript(Scripts, ChannelId: number): string
 	local ActorCode = self:CompileModule(Scripts)
 
-	--// ChannelId зашиваем литералом: run_on_actor/run_on_thread/Proxy:Execute
-	--// не везде пробрасывают varargs в actor-чанк -> актор не находил канал
-	--// (GetCommChannel получал таблицу/nil) и молча ничего не присылал.
-	ActorCode ..= "\nlocal ChannelId = ...\n"
+	ActorCode ..= "\nlocal ChannelId, Act = ...\n"
 	ActorCode ..= `if type(ChannelId) ~= "number" then ChannelId = {tostring(ChannelId)} end\n`
 	ActorCode ..= [[
-	local CurrentActor = select(2, ...)
-	if typeof(CurrentActor) ~= "Instance" and typeof(get_current_actor) == "function" then
-		local Ok, Resolved = pcall(get_current_actor)
-		if Ok and typeof(Resolved) == "Instance" then
-			CurrentActor = Resolved
+	local function Say(...)
+		local Parts = {}
+		for i = 1, select("#", ...) do
+			Parts[i] = tostring(select(i, ...))
 		end
+		local Text = table.concat(Parts, " ")
+		print("[SigmaSpy][Actor]", Text)
+		warn("[SigmaSpy][Actor]", Text)
 	end
 
-	local ExtraData = {
-		IsActor = true,
-		Actor = typeof(CurrentActor) == "Instance" and CurrentActor or nil,
-	}
-	]]
-	ActorCode ..= `Libraries.Hook:BeginService(Libraries, ExtraData, ChannelId)\n`
-	ActorCode ..= `Libraries.Hook:BeginHooks()\n`
+	Say("START channel=", ChannelId, "actor=", Act)
+	Say("APIs: hookfunction=", typeof(hookfunction), "getrawmetatable=", typeof(getrawmetatable),
+		"oth=", typeof(oth), "getconn=", typeof(getconnections),
+		"setthreadidentity=", typeof(setthreadidentity), "cloneref=", typeof(cloneref))
 
+	local Ok, Err = pcall(function()
+		local ExtraData = {
+			IsActor = true,
+			Actor = typeof(Act) == "Instance" and Act or nil,
+		}
+		Libraries.Hook:BeginService(Libraries, ExtraData, ChannelId)
+		Say("BeginService OK")
+
+		pcall(function()
+			Libraries.Communication:ConsolePrint("Actor connected:", tostring(ChannelId))
+		end)
+
+		Libraries.Hook:BeginHooks()
+		Say("BeginHooks OK")
+	end)
+
+	if not Ok then
+		Say("FAIL:", Err)
+	end
+	]]
 	return ActorCode
 end
 

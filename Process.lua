@@ -702,8 +702,17 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         end
     end
 
+	local RemotePath
+    do
+        local OkPath, Path = pcall(function()
+            return Remote:GetFullName()
+        end)
+        RemotePath = OkPath and Path or nil
+    end								
+
     local CallingScript = getcallingscript()
     self:Merge(Data, {
+	    Path = RemotePath,
         Remote = (function(R)
             local Ok, Cloned = pcall(cloneref, R)
             return Ok and Cloned or R

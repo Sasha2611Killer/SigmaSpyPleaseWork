@@ -220,10 +220,13 @@ end
 --//    старая версия падала на индексации и роняла весь LoadHooks;
 --//  * код актора обёрнут в xpcall: ошибка внутри VM актора теперь видна
 --//    в консоли и в файле SigmaSpy_actor_error.txt (по каналу она не приходит);
---//  * короткий watchdog на 10 секунд добирает акторы, у которых VM поднялась позже.
+--//  * имя актора передаётся внутрь кода, поэтому в консоли видно, кто подключился;
+--//  * дедупликация по полному имени: Delta отдаёт новую обёртку Instance на
+--//    каждый getactors(), сравнение по ссылке запускало один актор 8 раз.
 local ActorErrorFile = "SigmaSpy_actor_error.txt"
 
 local ActorCodeWrapper = [==[
+pcall(function() __SigmaSpyActorName = %s end)
 local __sigmaOk, __sigmaErr = xpcall(function()
 %s
 end, function(__e)
@@ -256,30 +259,41 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end)
 
-	local Payload = ActorCodeWrapper:format(Code)
-
-	local Hooked = setmetatable({}, { __mode = "k" })
+	--// Ключ по полному имени, а не по ссылке: Delta отдаёт новый Instance-обёртку
+	--// на каждый getactors(), из-за чего один и тот же актор запускался 8 раз.
+	local HookedKeys = {}
 	local HookedCount = 0
 	local Seen = 0
 	local Failures = {}
 
+	local function ActorKey(Actor)
+		local Ok, Name = pcall(function() return Actor:GetFullName() end)
+		if Ok and type(Name) == "string" and #Name > 0 then return Name end
+		return tostring(Actor)
+	end
+
 	local function TryActor(Actor, Quiet)
 		if typeof(Actor) ~= "Instance" or not Actor:IsA("Actor") then return false end
-		if Hooked[Actor] then return true end
+
+		local Key = ActorKey(Actor)
+		if HookedKeys[Key] then return true end
 		Seen += 1
+
+		--// имя актора уезжает внутрь кода — в консоли видно, кто подключился
+		local Payload = ActorCodeWrapper:format(("%q"):format(Key), Code)
 
 		local Ok, Ret = pcall(run_on_actor, Actor, Payload, ChannelId)
 		if Ok and Ret ~= false then
-			Hooked[Actor] = true
+			HookedKeys[Key] = true
 			HookedCount += 1
-			Log(("actor подключён: %s"):format(tostring(Actor)))
+			Log(("actor подключён: %s"):format(Key))
 			return true
 		end
 
 		local Reason = ("ok=%s ret=%s"):format(tostring(Ok), tostring(Ret))
-		Failures[tostring(Actor)] = Reason
+		Failures[Key] = Reason
 		if not Quiet then
-			Warn(("actor %s не принял код (%s)"):format(tostring(Actor), Reason))
+			Warn(("actor %s не принял код (%s)"):format(Key, Reason))
 		end
 		return false
 	end
@@ -308,10 +322,11 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		local OkStates, States = pcall(getactorstates)
 		if OkStates and typeof(States) == "table" then
 			Log(("actors: getactorstates = %d"):format(#States))
+			local StatePayload = ActorCodeWrapper:format('"actor state"', Code)
 			for _, State in next, States do
 				if type(State) == "thread" then
 					if typeof(run_on_thread) == "function" then
-						local OkRun, RetRun = pcall(run_on_thread, State, Payload, ChannelId)
+						local OkRun, RetRun = pcall(run_on_thread, State, StatePayload, ChannelId)
 						Log(("actor state (thread): run_on_thread ok=%s ret=%s")
 							:format(tostring(OkRun), tostring(RetRun)))
 					end
@@ -322,7 +337,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 				local OkIs, IsState = pcall(function() return State.IsActorState end)
 				if OkIs and IsState then
 					local OkExec, RetExec = pcall(function()
-						return State:Execute(Payload, ChannelId, State:GetActors()[1])
+						return State:Execute(StatePayload, ChannelId, State:GetActors()[1])
 					end)
 					Log(("actor state: Execute ok=%s ret=%s")
 						:format(tostring(OkExec), tostring(RetExec)))
@@ -333,29 +348,41 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
-	--// 3) акторы, у которых VM поднимается позже (и новые акторы)
-	task.spawn(function()
-		for _ = 1, 20 do
-			task.wait(0.5)
-			local OkNow, Current = pcall(getactors)
-			if OkNow and typeof(Current) == "table" then
-				for _, Actor in next, Current do
-					TryActor(Actor, true)
+	--// 3) актор мог получить VM позже — повторная проверка, без повторов запуска
+	if HookedCount == 0 then
+		task.spawn(function()
+			for _ = 1, 10 do
+				task.wait(1)
+				if HookedCount > 0 then break end
+				local OkNow, Current = pcall(getactors)
+				if OkNow and typeof(Current) == "table" then
+					for _, Actor in next, Current do
+						TryActor(Actor, true)
+					end
 				end
 			end
-		end
 
-		if HookedCount > 0 then
-			Log(("actors: итог — подключено %d"):format(HookedCount))
-		else
-			Warn("actors: за 10 секунд ни один актор не принял код")
-			for Name, Reason in next, Failures do
-				Warn(("  %s: %s"):format(Name, Reason))
+			if HookedCount == 0 then
+				Warn("actors: за 10 секунд ни один актор не принял код")
+				for Name, Reason in next, Failures do
+					Warn(("  %s: %s"):format(Name, Reason))
+				end
+			else
+				Log(("actors: итог — подключено %d"):format(HookedCount))
 			end
+		end)
+	end
+
+	--// 4) новые акторы после запуска (на Delta on_actor_state_created = nil)
+	game.DescendantAdded:Connect(function(Instance)
+		if typeof(Instance) == "Instance" and Instance:IsA("Actor") then
+			task.delay(0.5, function()
+				TryActor(Instance, true)
+			end)
 		end
 	end)
 
-	--// 4) ошибки из VM актора по каналу не приходят — читаем файл
+	--// 5) ошибки из VM актора по каналу не приходят — читаем файл
 	if typeof(isfile) == "function" and typeof(readfile) == "function" then
 		task.delay(2, function()
 			local OkFile, Content = pcall(function()
@@ -377,14 +404,27 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 	end
 end
 
+local FirstActorRemoteLogged = false
 local function ProcessRemote(OriginalFunc, MetaMethod: string, self, Method: string, ...)
-	return Process:ProcessRemote({
+	local Result = Process:ProcessRemote({
 		Method = Method,
 		OriginalFunc = OriginalFunc,
 		MetaMethod = MetaMethod,
 		TransferType = "Send",
 		IsExploit = checkcaller()
 	}, self, ...)
+
+	--// один раз на VM: доказательство, что хук в акторе реально ловит вызовы
+	if not FirstActorRemoteLogged then
+		local OkExtra, Extra = pcall(function() return Process.ExtraData end)
+		if OkExtra and type(Extra) == "table" and Extra.IsActor then
+			FirstActorRemoteLogged = true
+			pcall(print, ("[SigmaSpy] actor: первый перехваченный remote — %s:%s")
+				:format(tostring(self), tostring(Method)))
+		end
+	end
+
+	return Result
 end
 
 function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
@@ -470,6 +510,18 @@ function Hook:BeginHooks()
 	--// получает таблицу вместо значений (зависание камеры).
 	local UseOth = typeof(oth) == "table" and typeof(oth.hook) == "function"
 		and (not Configuration or Configuration.UseOthHooks ~= false)
+
+	self.HookMode = UseOth and "oth" or "namecall"
+
+	--// в акторе Configuration раньше терялась (CompileModule выбрасывал таблицы)
+	if Process and Process.ExtraData and Process.ExtraData.IsActor then
+		pcall(print, ("[SigmaSpy] actor: BeginHooks, Configuration=%s, UseOthHooks=%s, режим=%s")
+			:format(
+				tostring(Configuration ~= nil),
+				tostring(Configuration and Configuration.UseOthHooks),
+				self.HookMode
+			))
+	end
 
 	local OriginalNameCall
 
@@ -617,8 +669,19 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 
 	--// [DEBUG] печатается из VM актора — сразу видно, дошёл ли код до BeginService
 	local IsActor = type(ExtraData) == "table" and ExtraData.IsActor == true
+
+	--// имя актора передаёт обёртка RunOnActors (глобал ставится внутри той же VM)
+	local Who = "actor"
 	if IsActor then
-		pcall(print, "[SigmaSpy] actor: BeginService старт, channel = " .. tostring(ChannelId))
+		local OkWho, Name = pcall(function() return __SigmaSpyActorName end)
+		if OkWho and type(Name) == "string" and #Name > 0 then
+			Who = Name
+		end
+	end
+
+	if IsActor then
+		pcall(print, ("[SigmaSpy] actor: BeginService старт, channel = %s (%s)")
+			:format(tostring(ChannelId), Who))
 	end
 
 	--// Librareis
@@ -627,6 +690,16 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 	local Communication = Libraries.Communication
 	local Generation = Libraries.Generation
 	local Config = Libraries.Config
+
+	--// [FIX] В акторе Configuration раньше отсутствовала: InitData.Modules
+	--// собирается вручную и поля Configuration в нём не было, а в Libraries
+	--// таблицы выбрасывались генератором. Из-за этого Hook:BeginHooks в акторе
+	--// шёл другим режимом (oth), и remote'ы актора не попадали в лог.
+	local Configuration = Libraries.Configuration or Configuration
+	if Configuration and IsActor then
+		pcall(print, ("[SigmaSpy] actor: Configuration получена (%s), UseOthHooks=%s")
+			:format(tostring(Configuration), tostring(Configuration.UseOthHooks)))
+	end
 
 	--// Check for configuration overwrites
 	ProcessLib:CheckConfig(Config)
@@ -639,6 +712,7 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 			Communication = Communication,
 			Process = ProcessLib,
 			Config = Config,
+			Configuration = Configuration,
 			Hook = self
 		},
 		Services = setmetatable({}, {
@@ -679,7 +753,12 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 				self:PatchFunctions()
 			end
 			self:BeginHooks()
-			Communication:ConsolePrint("Hooks loaded")
+
+			--// в консоли видно, что актор реально доехал до установки хуков
+			local Message = IsActor
+				and ("[actor] Hooks loaded — " .. Who .. " (режим: " .. tostring(self.HookMode) .. ")")
+				or "Hooks loaded"
+			Communication:ConsolePrint(Message)
 		end
 	})
 	
@@ -691,8 +770,8 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 	self:Init(InitData)
 
 	if IsActor then
-		pcall(print, "[SigmaSpy] actor: Init готов, отправляю 'Actor connected!' в канал")
-		Communication:ConsolePrint("Actor connected!")
+		pcall(print, ("[SigmaSpy] actor: Init готов, отправляю 'Actor connected!' (%s)"):format(Who))
+		Communication:ConsolePrint("Actor connected! — " .. Who)
 	else
 		print("[SigmaSpy] main: BeginService готов, канал = " .. tostring(ChannelId))
 	end

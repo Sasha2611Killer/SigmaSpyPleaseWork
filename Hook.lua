@@ -213,7 +213,12 @@ function Hook:IsSpyConnectionFunction(Function): boolean
 end
 
 function Hook:RunOnActors(Code: string, ChannelId: number)
-	if not getactors or not run_on_actor then return end
+	print("[SigmaSpy] RunOnActors called")
+	print("[SigmaSpy] getactors =", typeof(getactors), "run_on_actor =", typeof(run_on_actor))
+	if not getactors or not run_on_actor then
+		print("[SigmaSpy] Actor API missing, skipping actor hooks")
+		return
+	end
 
 	--// Cobalt-style ретрай: run_on_actor может падать на неинициализированных
 	--// акторах (LuaStateProxy) — повторяем до 10 раз с паузой

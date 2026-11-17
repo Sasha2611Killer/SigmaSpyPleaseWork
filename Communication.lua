@@ -250,7 +250,7 @@ function Module:SetChannel(NewChannel: number)
 end
 
 function Module:ConsolePrint(...)
-    self:Communicate("Print", ...)
+    pcall(self.Communicate, self, "Print", ...)
 end
 
 --// =====================================================================
@@ -305,11 +305,9 @@ local function FlushBatch(self)
                 BatchSize += 1
                 Batch[BatchSize] = Item
             end
-            --// Один битый лог не должен убить весь батч — просто пропускаем
         end
     end
 
-    --// Очередь опустела — обнуляем указатели (как у Cobalt)
     if LogQueueHead > LogQueueTail then
         LogQueue = {}
         LogQueueHead, LogQueueTail = 1, 0
@@ -317,13 +315,24 @@ local function FlushBatch(self)
 
     if BatchSize <= 0 then return end
 
+    --// [DEBUG] в акторе видно: сколько логов реально уехало
+    local IsActor = Process and Process.ExtraData and Process.ExtraData.IsActor
+    if IsActor then
+        pcall(print, ("[SigmaSpy][actor] FlushBatch: %d items, channel=%s")
+            :format(BatchSize, tostring(Channel)))
+    end
+
     local Ok, Err = pcall(self.Communicate, self, "QueueLog", Batch)
+
+    if IsActor then
+        pcall(print, ("[SigmaSpy][actor] SendQueueLog ok=%s err=%s")
+            :format(tostring(Ok), tostring(Err):sub(1, 120)))
+    end
+
     if not Ok then
-        -- не warn: строка ошибки может содержать имена функций из списка АС
         self:ConsolePrint("QueueLog error:", tostring(Err):sub(1, 120))
     end
 
-    --// Батч уже скопирован каналом (BindableEvent), ссылки не держим
     table.clear(Batch)
 end
 
@@ -397,9 +406,23 @@ end
 function Module:Communicate(...)
     local Fire = self:ChannelIndex(Channel, "Fire")
     local identity = getthreadidentity()
-    setthreadidentity(8)
-    Fire(Channel, ...)
-    setthreadidentity(identity)
+
+    --// В акторе (VM актора) identity уже правильный для comm-канала,
+    --// смена на 8 ломает Fire. Меняем только в main-треде.
+    local IsActor = Process and Process.ExtraData and Process.ExtraData.IsActor
+    if not IsActor then
+        setthreadidentity(8)
+    end
+
+    local Ok, Err = pcall(Fire, Channel, ...)
+
+    if not IsActor then
+        setthreadidentity(identity)
+    end
+
+    if not Ok then
+        warn("[SigmaSpy] Communicate failed:", Err)
+    end
 end
 
 function Module:AddConnection(Callback): RBXScriptConnection

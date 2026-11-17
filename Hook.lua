@@ -215,8 +215,6 @@ end
 function Hook:RunOnActors(Code: string, ChannelId: number)
 	if not getactors or not run_on_actor then return end
 
-	--// Cobalt-style ретрай: run_on_actor может падать на неинициализированных
-	--// акторах (LuaStateProxy) — повторяем до 10 раз с паузой
 	local function HookActor(Actor)
 		task.spawn(function()
 			local Hooked = false
@@ -228,57 +226,71 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 					task.wait(0.25)
 				end
 			until Hooked or Attempts > 10
+			if not Hooked then
+				Communication:ConsolePrint(
+					`[RunOnActors] run_on_actor FAILED on {tostring(Actor)} after {Attempts} attempts`
+				)
+			end
 		end)
 	end
 
-	--// Современная библиотека: getactorstates может возвращать НЕ Actor-инстансы,
-	--// а состояния — треды (run_on_thread) или LuaStateProxy (:Execute).
-	--// Классический getactors() такие акторы не видит.
-	--
-	--// [FIX] SkipClassic ставим ТОЛЬКО если хотя бы один state реально
-	--// захукан. Раньше в thread-ветке SkipClassic = true ставился
-	--// безусловно — pcall(run_on_thread) глушил ошибку, классика
-	--// пропускалась, и акторы вообще не отправлялись.
 	local SkipClassic = false
 	if typeof(getactorstates) == "function" then
 		local Ok, States = pcall(getactorstates)
-		if Ok and type(States) == "table" then
+		if Ok and type(States) == "table" and next(States) ~= nil then
 			local First = next(States)
+
 			if type(First) == "thread" and typeof(run_on_thread) == "function" then
 				local HookedAny = false
 				for _, State in States do
-					if pcall(run_on_thread, State, Code, ChannelId) then
+					local OkT, Res = pcall(run_on_thread, State, Code, ChannelId)
+					--// [FIX] успех только если run_on_thread явно вернул true
+					--// (или хотя бы не false/nil) — pcall сам по себе не показатель
+					if OkT and Res ~= false and Res ~= nil then
 						HookedAny = true
 					end
 				end
 				if HookedAny then
 					SkipClassic = true
+				else
+					Communication:ConsolePrint(
+						"[RunOnActors] run_on_thread did not confirm hook — falling back to classic"
+					)
 				end
+
 			elseif (type(First) == "userdata" or type(First) == "table") and First.IsActorState then
 				local HookedAny = false
 				for _, Proxy in States do
 					if not Proxy.IsActorState then continue end
-					local OkH = pcall(function()
+					if typeof(Proxy.Execute) ~= "function"
+						or typeof(Proxy.GetActors) ~= "function"
+					then
+						continue
+					end
+					local OkH, Res = pcall(function()
 						return Proxy:Execute(Code, ChannelId, Proxy:GetActors()[1])
 					end)
-					HookedAny = HookedAny or OkH
+					--// [FIX] Execute должен вернуть истину, а не просто не упасть
+					if OkH and Res ~= false and Res ~= nil then
+						HookedAny = true
+					end
 				end
 				if HookedAny then
 					SkipClassic = true
+				else
+					Communication:ConsolePrint(
+						"[RunOnActors] LuaStateProxy:Execute did not confirm hook — falling back to classic"
+					)
 				end
 			end
 		end
 	end
 
-	--// Текущие + удалённые (неинициализированные) акторы — как в Cobalt.
-	--// [FIX] Дополнительно прогоняем классику, если getactors() непустой,
-	--// даже когда SkipClassic = true — на случай, если state-путь
-	--// захукал не все акторы. run_on_actor идемпотентен по коду.
-	local HasClassicActors = false
+	--// [FIX] Классика идёт всегда, если getactors() непустой —
+	--// даже при SkipClassic = true. run_on_actor идемпотентен по коду,
+	--// повторный запуск безвреден, а пропуск = акторы не захуканы.
 	local ClassicActors = getactors()
-	if ClassicActors and next(ClassicActors) ~= nil then
-		HasClassicActors = true
-	end
+	local HasClassicActors = ClassicActors ~= nil and next(ClassicActors) ~= nil
 
 	if not SkipClassic or HasClassicActors then
 		local Deleted = typeof(getdeletedactors) == "function" and getdeletedactors() or {}
@@ -291,9 +303,8 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
-	--// Акторы, созданные ПОЗЖЕ: нативное событие → fallback DescendantAdded.
-	--// В старой версии такие акторы вообще не хукались.
-	local StateCreated = typeof(on_actor_state_created) == "RBXScriptSignal" and on_actor_state_created or nil
+	local StateCreated = typeof(on_actor_state_created) == "RBXScriptSignal"
+		and on_actor_state_created or nil
 	if StateCreated then
 		StateCreated:Connect(HookActor)
 	else

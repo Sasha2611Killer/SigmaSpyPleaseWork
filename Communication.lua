@@ -317,7 +317,16 @@ local function FlushBatch(self)
 
     if BatchSize <= 0 then return end
 
+	if rawget(_G, "SIGMA_ACTOR_DEBUG") then
+        print("[Dbg] flush:", BatchSize, typeof(Channel))
+    end
+
     local Ok, Err = pcall(self.Communicate, self, "QueueLog", Batch)
+
+    if rawget(_G, "SIGMA_ACTOR_DEBUG") then
+        print("[Dbg] flush result:", Ok, Err)
+    end
+		
     if not Ok then
         -- не warn: строка ошибки может содержать имена функций из списка АС
         self:ConsolePrint("QueueLog error:", tostring(Err):sub(1, 120))
@@ -332,11 +341,10 @@ EnsureFlusher = function(self)
     FlusherStarted = true
 
     task.spawn(function()
-		while true do
-			if LogQueueHead <= LogQueueTail then
-				--// один битый батч не должен убивать флушер навсегда
-				pcall(FlushBatch, self)
-			end
+		 while true do
+            if LogQueueHead <= LogQueueTail then
+                pcall(FlushBatch, self)
+            end
 			task.wait()
 		end
 	end)
@@ -359,6 +367,9 @@ function Module:QueueLog(Data)
 
     LogQueueTail += 1
     LogQueue[LogQueueTail] = Data
+	 if rawget(_G, "SIGMA_ACTOR_DEBUG") then
+        print("[Dbg] queue:", Data.Method, Id)
+    end
 end
 
 --// Сколько вызовов отброшено лимитом (для UI/консоли)

@@ -260,6 +260,10 @@ function Files:MakeActorScript(Scripts, ChannelId: number): string
 		"GV.SIGMA_ACTOR_HOOKED = true",
 		"",
 	}, "\n") .. ActorCode
+
+	ActorCode ..= "\nlocal ChannelId, Act = ...\n"
+	ActorCode ..= "if type(ChannelId) ~= 'number' then ChannelId = " .. tostring(ChannelId) .. " end\n"	
+		
 	ActorCode ..= [[
 	local function Say(...)
 		local Parts = {}

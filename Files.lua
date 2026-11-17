@@ -253,70 +253,13 @@ function Files:CompileModule(Scripts): string
 end
 
 function Files:MakeActorScript(Scripts, ChannelId: number): string
-	local ActorCode = self:CompileModule(Scripts)
-	ActorCode = table.concat({
-		"local GV = (typeof(getgenv) == 'function' and getgenv()) or _G",
-		"if GV.SIGMA_ACTOR_HOOKED == true then return end",
-		"GV.SIGMA_ACTOR_HOOKED = true",
-		"",
-	}, "\n") .. ActorCode
-
-	ActorCode ..= "\nlocal ChannelId, Act = ...\n"
-	ActorCode ..= "if type(ChannelId) ~= 'number' then ChannelId = " .. tostring(ChannelId) .. " end\n"	
-		
+	local ActorCode = Files:CompileModule(Scripts)
 	ActorCode ..= [[
-	local function Say(...)
-		local Parts = {}
-		for i = 1, select("#", ...) do
-			Parts[i] = tostring(select(i, ...))
-		end
-		local Text = table.concat(Parts, " ")
-		print("[SigmaSpy][Actor]", Text)
-		warn("[SigmaSpy][Actor]", Text)
-	end
-
-	Say("START channel=", ChannelId, "actor=", Act)
-	Say("APIs: hookfunction=", typeof(hookfunction), "getrawmetatable=", typeof(getrawmetatable),
-		"oth=", typeof(oth), "getconn=", typeof(getconnections),
-		"setthreadidentity=", typeof(setthreadidentity), "cloneref=", typeof(cloneref))
-
-	_G.SIGMA_ACTOR_DEBUG = true
-
-	local Ok, Err = pcall(function()
-		local ExtraData = {
-			IsActor = true,
-			Actor = typeof(Act) == "Instance" and Act or nil,
-		}
-
-		Libraries.Hook:BeginService(Libraries, ExtraData, ChannelId)
-		Say("BeginService OK")
-
-		pcall(function()
-			Libraries.Communication:ConsolePrint("Actor connected:", tostring(ChannelId))
-		end)
-
-		--// тот же режим хука, что и в main (в акторе Configuration нет)
-		Libraries.Hook:PushConfig({
-			Configuration = { UseOthHooks = false }
-		})
-
-		Libraries.Hook:BeginHooks()
-		Say("BeginHooks OK")
-			
-		--// receive-хуки отдельно и без блокировки старта
-		task.defer(function()
-			local OkR, ErrR = pcall(function()
-				Libraries.Hook:LoadReceiveHooks()
-			end)
-			Say("ReceiveHooks:", OkR, ErrR)
-		end)
-	end)
-
-	if not Ok then
-		Say("FAIL:", Err)
-		GV.SIGMA_ACTOR_HOOKED = nil
-	end
+	local ExtraData = {
+		IsActor = true
+	}
 	]]
+	ActorCode ..= `Libraries.Hook:BeginService(Libraries, ExtraData, {ChannelId})`
 	return ActorCode
 end
 

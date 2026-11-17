@@ -212,76 +212,132 @@ function Hook:IsSpyConnectionFunction(Function): boolean
 		and rawget(Env, "__SigmaSpyLogger") == SpyVerificationToken
 end
 
+--// [ROBUST] Хук акторов.
+--// Почему переписано:
+--//  * run_on_actor на Delta при отказе возвращает false, а pcall возвращает true —
+--//    старая версия считала это успехом и молча ничего не хукала;
+--//  * getactorstates() может вернуть userdata без поля IsActorState — старая версия
+--//    падала на индексации и роняла весь LoadHooks;
+--//  * Instance.new("Actor") Delta вообще не видит в getactors() (нужна готовая VM),
+--//    поэтому бессмысленно ретраить такой актор 10 раз с паузами.
 function Hook:RunOnActors(Code: string, ChannelId: number)
-	if not getactors or not run_on_actor then return end
-
-	--// Cobalt-style ретрай: run_on_actor может падать на неинициализированных
-	--// акторах (LuaStateProxy) — повторяем до 10 раз с паузой
-	local function HookActor(Actor)
-		task.spawn(function()
-			local Hooked = false
-			local Attempts = 0
-			repeat
-				Hooked = pcall(run_on_actor, Actor, Code, ChannelId)
-				Attempts += 1
-				if not Hooked then
-					task.wait(0.25)
-				end
-			until Hooked or Attempts > 10
-		end)
+	if typeof(getactors) ~= "function" or typeof(run_on_actor) ~= "function" then
+		warn("[SigmaSpy] actors: нет getactors/run_on_actor — акторы пропущены")
+		return
 	end
 
-	--// Современная библиотека: getactorstates может возвращать НЕ Actor-инстансы,
-	--// а состояния — треды (run_on_thread) или LuaStateProxy (:Execute).
-	--// Классический getactors() такие акторы не видит.
-	local SkipClassic = false
-	if typeof(getactorstates) == "function" then
+	local Attempted = setmetatable({}, { __mode = "k" })
+	local Connected = 0
+	local Tried = 0
+	local UsedStates = false
+
+	local function TryActor(Actor, Attempt, Quiet)
+		if typeof(Actor) ~= "Instance" or not Actor:IsA("Actor") then return false end
+		if Attempted[Actor] then return false end
+		Attempted[Actor] = true
+		Tried += 1
+
+		--// Delta: при отказе возвращает false, ошибку не бросает
+		local Ok, Ret = pcall(run_on_actor, Actor, Code, ChannelId)
+		if Ok and Ret ~= false then
+			Connected += 1
+			return true
+		end
+
+		--// у актора могла ещё не подняться VM — одна отложенная попытка
+		if Attempt == 1 then
+			task.delay(1, function()
+				if UsedStates then return end
+				local Ok2, Ret2 = pcall(run_on_actor, Actor, Code, ChannelId)
+				if Ok2 and Ret2 ~= false then
+					Connected += 1
+				elseif not Quiet then
+					warn(("[SigmaSpy] actor %s не принял код (ok=%s, ret=%s)")
+						:format(tostring(Actor), tostring(Ok2), tostring(Ret2)))
+				end
+			end)
+		elseif not Quiet then
+			warn(("[SigmaSpy] actor %s не принял код (ok=%s, ret=%s)")
+				:format(tostring(Actor), tostring(Ok), tostring(Ret)))
+		end
+		return false
+	end
+
+	--// 1) акторы из игры (у Delta это единственные, у кого есть VM)
+	local Lists = {}
+	local OkGet, All = pcall(getactors)
+	if OkGet and typeof(All) == "table" then
+		Lists[#Lists + 1] = { All, false }
+	end
+	if typeof(getdeletedactors) == "function" then
+		local OkDel, Deleted = pcall(getdeletedactors)
+		if OkDel and typeof(Deleted) == "table" then
+			--// удалённые акторы почти всегда уже без VM — не спамим warn
+			Lists[#Lists + 1] = { Deleted, true }
+		end
+	end
+
+	for _, Entry in next, Lists do
+		for _, Actor in next, Entry[1] do
+			TryActor(Actor, 1, Entry[2])
+		end
+	end
+
+	--// 2) если классический путь не дал ни одного подключения — состояния
+	local StatesUsed = 0
+	if Connected == 0 and typeof(getactorstates) == "function" then
 		local Ok, States = pcall(getactorstates)
-		if Ok and type(States) == "table" then
-			local First = next(States)
-			if type(First) == "thread" and typeof(run_on_thread) == "function" then
-				for _, State in States do
-					pcall(run_on_thread, State, Code, ChannelId)
+		if Ok and typeof(States) == "table" then
+			for _, State in next, States do
+				if type(State) == "thread" then
+					if typeof(run_on_thread) == "function" then
+						StatesUsed += 1
+						pcall(run_on_thread, State, Code, ChannelId)
+					end
+					continue
 				end
-				SkipClassic = true -- состояния захуканы — getactors-проход не нужен
-			elseif (type(First) == "userdata" or type(First) == "table") and First.IsActorState then
-				local HookedAny = false
-				for _, Proxy in States do
-					if not Proxy.IsActorState then continue end
-					local OkH = pcall(function()
-						return Proxy:Execute(Code, ChannelId, Proxy:GetActors()[1])
+
+				--// поле может отсутствовать (userdata/proxy) — проверяем безопасно
+				local OkIs, IsState = pcall(function() return State.IsActorState end)
+				if OkIs and IsState then
+					StatesUsed += 1
+					pcall(function()
+						return State:Execute(Code, ChannelId, State:GetActors()[1])
 					end)
-					HookedAny = HookedAny or OkH
-				end
-				if HookedAny then
-					SkipClassic = true
 				end
 			end
 		end
 	end
+	UsedStates = StatesUsed > 0
 
-	--// Текущие + удалённые (неинициализированные) акторы — как в Cobalt
-	if not SkipClassic then
-		for _, Category in {getactors(), typeof(getdeletedactors) == "function" and getdeletedactors() or {}} do
-			if Category then
-				for _, Actor in next, Category do
-					HookActor(Actor)
-				end
-			end
-		end
-	end
-
-	--// Акторы, созданные ПОЗЖЕ: нативное событие → fallback DescendantAdded.
-	--// В старой версии такие акторы вообще не хукались.
-	local StateCreated = typeof(on_actor_state_created) == "RBXScriptSignal" and on_actor_state_created or nil
-	if StateCreated then
-		StateCreated:Connect(HookActor)
+	--// 3) акторы, появившиеся позже
+	local Signal = typeof(on_actor_state_created) == "RBXScriptSignal" and on_actor_state_created or nil
+	if Signal then
+		Signal:Connect(function(Actor)
+			TryActor(Actor, 1)
+		end)
 	else
 		game.DescendantAdded:Connect(function(Instance)
 			if typeof(Instance) == "Instance" and Instance:IsA("Actor") then
-				HookActor(Instance)
+				task.delay(0.5, function()
+					TryActor(Instance, 1)
+				end)
 			end
 		end)
+	end
+
+	if UsedStates then
+		if Configuration and Configuration.Debug then
+			print("[SigmaSpy] actors: использован путь getactorstates()/Execute")
+		end
+	elseif Connected > 0 then
+		if Configuration and Configuration.Debug then
+			print(("[SigmaSpy] actors: подключено %d"):format(Connected))
+		end
+	elseif Tried > 0 then
+		warn("[SigmaSpy] actors: ни один актор не принял код (Delta видит только акторы с готовой VM)")
+	elseif Configuration and Configuration.Debug then
+		print("[SigmaSpy] actors: в игре нет акторов с VM — пропущено")
 	end
 end
 
@@ -516,6 +572,12 @@ function Hook:ConnectClientRecive(Remote)
 end
 
 function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
+	--// [FIX] генератор ActorCode может передать {ChannelId} — разворачиваем,
+	--// иначе get_comm_channel(number expected, got table)
+	if type(ChannelId) == "table" then
+		ChannelId = ChannelId[1]
+	end
+
 	--// Librareis
 	local ReturnSpoofs = Libraries.ReturnSpoofs
 	local ProcessLib = Libraries.Process
@@ -587,6 +649,8 @@ function Hook:LoadMetaHooks(ActorCode: string, ChannelId: number)
 	--// Hook actors
 	if not Configuration or not Configuration.NoActors then
 		self:RunOnActors(ActorCode, ChannelId)
+	else
+		warn("[SigmaSpy] actors: отключены (NoActors = true)")
 	end
 
 	--// Hook current thread

@@ -310,19 +310,34 @@ function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
 	--// Addionally, this is for __index calls.
 	--// 	A __namecall hook will not detect this
 	OriginalFunc = self:HookFunction(Func, function(self, ...)
-		--// Check if the Object is allowed 
+		if rawget(_G, "SIGMA_ACTOR_DEBUG") then
+			print("[SigmaSpy][Dbg] index call:", FuncName, typeof(self))
+		end
 		if not Process:RemoteAllowed(self, "Send", FuncName) then return end
-
-		--// Process the remote data
 		return ProcessRemote(OriginalFunc, "__index", self, FuncName, ...)
 	end)
 end
 
 function Hook:HookRemoteIndexes()
-	local RemoteClassData = Process.RemoteClassData
-	for ClassName, Data in RemoteClassData do
+	for ClassName, Data in Process.RemoteClassData do
 		local FuncName = Data.Send[1]
 		self:HookRemoteTypeIndex(ClassName, FuncName)
+	end
+
+	--// добиваем реальные инстансы (у них может быть своя C-функция)
+	for _, Service in next, game:GetChildren() do
+		for _, Obj in next, Service:GetDescendants() do
+			local Data = Process.RemoteClassData[Obj.ClassName]
+			if not Data then continue end
+			for _, Name in next, Data.Send do
+				pcall(function()
+					self:HookFunction(Obj[Name], function(self, ...)
+						if not Process:RemoteAllowed(self, "Send", Name) then return end
+						return ProcessRemote(nil, "__index", self, Name, ...)
+					end)
+				end)
+			end
+		end
 	end
 end
 

@@ -254,10 +254,9 @@ end
 
 function Files:MakeActorScript(Scripts, ChannelId: number): string
 	local ActorCode = self:CompileModule(Scripts)
-	if _G.SIGMA_ACTOR_HOOKED then return end
-
+	ActorCode = "if _G.SIGMA_ACTOR_HOOKED then return end\n_G.SIGMA_ACTOR_HOOKED = true\n" .. ActorCode
 	ActorCode ..= "\nlocal ChannelId, Act = ...\n"
-	ActorCode ..= `if type(ChannelId) ~= "number" then ChannelId = {tostring(ChannelId)} end\n`
+	ActorCode ..= "if type(ChannelId) ~= 'number' then ChannelId = " .. tostring(ChannelId) .. " end\n"
 	ActorCode ..= [[
 	local function Say(...)
 		local Parts = {}
@@ -296,7 +295,6 @@ function Files:MakeActorScript(Scripts, ChannelId: number): string
 
 		Libraries.Hook:BeginHooks()
 		Say("BeginHooks OK")
-        _G.SIGMA_ACTOR_HOOKED = true
 			
 		--// receive-хуки отдельно и без блокировки старта
 		task.defer(function()

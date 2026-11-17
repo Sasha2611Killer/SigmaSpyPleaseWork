@@ -21,31 +21,59 @@ type RemoteData = {
 local Process = {
     --// Remote classes
     RemoteClassData = {
-    ["RemoteEvent"] = {
-        Send = { "FireServer" },
-        Receive = { "OnClientEvent" },
+        ["RemoteEvent"] = {
+            Send = {
+                "FireServer",
+                "fireServer",
+				"fireserver",
+            },
+            Receive = {
+                "OnClientEvent",
+            }
+        },
+        ["RemoteFunction"] = {
+            IsRemoteFunction = true,
+            Send = {
+                "InvokeServer",
+                "invokeServer",
+				"invokeserver",
+            },
+            Receive = {
+                "OnClientInvoke",
+            }
+        },
+        ["UnreliableRemoteEvent"] = {
+            Send = {
+                "FireServer",
+                "fireServer",
+				"fireserver",
+            },
+            Receive = {
+                "OnClientEvent",
+            }
+        },
+        ["BindableEvent"] = {
+            NoReciveHook = true,
+            Send = {
+                "Fire",
+				"fire",
+            },
+            Receive = {
+                "Event",
+            }
+        },
+        ["BindableFunction"] = {
+            IsRemoteFunction = true,
+            NoReciveHook = true,
+            Send = {
+                "Invoke",
+				"invoke",
+            },
+            Receive = {
+                "OnInvoke",
+            }
+        }
     },
-    ["RemoteFunction"] = {
-        IsRemoteFunction = true,
-        Send = { "InvokeServer" },
-        Receive = { "OnClientInvoke" },
-    },
-    ["UnreliableRemoteEvent"] = {
-        Send = { "FireServer" },
-        Receive = { "OnClientEvent" },
-    },
-    ["BindableEvent"] = {
-        NoReciveHook = true,
-        Send = { "Fire" },
-        Receive = { "Event" },
-    },
-    ["BindableFunction"] = {
-        IsRemoteFunction = true,
-        NoReciveHook = true,
-        Send = { "Invoke" },
-        Receive = { "OnInvoke" },
-    }
-},
     RemoteOptions = {},
     LoopingRemotes = {},
 
@@ -145,14 +173,14 @@ end
 
 function Process:CheckValue(Value, Ignore: table?, Cache: table?)
     local Type = typeof(Value)
+    Communication:WaitCheck()
 
-     if Type == "table" then
+    if Type == "table" then
         Value = self:DeepCloneTable(Value, Ignore, Cache)
     elseif Type == "Instance" then
-        local Ok, Cloned = pcall(cloneref, Value)
-        Value = Ok and Cloned or Value
+        Value = cloneref(Value)
     end
-	
+
     return Value
 end
 
@@ -624,10 +652,6 @@ local ProcessCallback = newcclosure(function(Data: RemoteData, Remote, ...): tab
 end)
 
 function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
-	if rawget(_G, "SIGMA_ACTOR_DEBUG") then
-		print("[Dbg] ProcessRemote:", Data.Method, typeof(Remote))
-	end
-									
 	local Method = Data.Method
     local TransferType = Data.TransferType
     local IsReceive = Data.IsReceive
@@ -702,21 +726,9 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         end
     end
 
-	local RemotePath
-    do
-        local OkPath, Path = pcall(function()
-            return Remote:GetFullName()
-        end)
-        RemotePath = OkPath and Path or nil
-    end								
-
     local CallingScript = getcallingscript()
     self:Merge(Data, {
-	    Path = RemotePath,
-        Remote = (function(R)
-            local Ok, Cloned = pcall(cloneref, R)
-            return Ok and Cloned or R
-        end)(Remote),
+        Remote = cloneref(Remote),
 		CallingScript = CallingScript,
         CallingFunction = CallingFunction,
         --// Fallback: если стек пуст — getcallingscript() (владелец потока)
@@ -727,15 +739,6 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
         Timestamp = Timestamp,
         Args = {...}
     })
-
-   if ClassData and ClassData.IsRemoteFunction and not IsReceive then
-        Communication:QueueLog(Data)
-
-        local ReturnValues = ProcessCallback(Data, Remote, ...)
-        Data.ReturnValues = ReturnValues
-
-        return ReturnValues
-    end
 
     local ReturnValues = ProcessCallback(Data, Remote, ...)
     Data.ReturnValues = ReturnValues

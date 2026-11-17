@@ -212,71 +212,61 @@ end
 function Hook:RunOnActors(Code: string, ChannelId: number)
 	if not getactors or not run_on_actor then return end
 
-	local function HookActor(Actor, Source: string?)
+	local Injected = self.InjectedActors
+	if not Injected then
+		Injected = setmetatable({}, {__mode = "k"})
+		self.InjectedActors = Injected
+	end
+
+	local function HookActor(Actor)
 		if typeof(Actor) ~= "Instance" then return end
+		if Injected[Actor] then return end
+		Injected[Actor] = true
+
 		task.spawn(function()
-			local Hooked = false
-			local Attempts = 0
-			repeat
-				Hooked = pcall(run_on_actor, Actor, Code, ChannelId, Actor)
-				Attempts += 1
-				if not Hooked then task.wait(0.25) end
-			until Hooked or Attempts > 10
-			warn("[Spy] inject path=", Source or "classic", "actor=", Actor:GetFullName(), "ok=", Hooked)
+			for _ = 1, 10 do
+				if pcall(run_on_actor, Actor, Code, ChannelId, Actor) then return end
+				task.wait(0.25)
+			end
 		end)
 	end
 
 	local SkipClassic = false
+
 	if typeof(getactorstates) == "function" then
 		local Ok, States = pcall(getactorstates)
 		if Ok and type(States) == "table" then
-			for k, v in next, States do
-				warn("[Spy] state", k, typeof(k), "value:", typeof(v), "IsActorState:", v and v.IsActorState)
-			end
+			for _, Proxy in next, States do
+				local OkProxy, Done = pcall(function()
+					if not Proxy.IsActorState then return false end
 
-			local _, First = next(States)
-			if type(First) == "thread" and typeof(run_on_thread) == "function" then
-				for _, State in States do
-					warn("[Spy] inject path=thread", pcall(run_on_thread, State, Code, ChannelId, nil))
-				end
-				SkipClassic = true
-			elseif First and First.IsActorState then
-				local HookedAny = false
-				for _, Proxy in States do
-					if not Proxy.IsActorState then continue end
 					local Actors = Proxy:GetActors()
-					local OkH, Err = pcall(function()
-						return Proxy:Execute(Code, ChannelId, Actors[1])
-					end)
-					warn("[Spy] inject path=proxy", "actor=", Actors[1], "ok=", OkH, Err)
-					HookedAny = HookedAny or OkH
-				end
-				if HookedAny then
-					SkipClassic = true
-				end
+					local Actor = Actors and Actors[1]
+					if typeof(Actor) ~= "Instance" then return false end
+					if Injected[Actor] then return true end
+
+					Proxy:Execute(Code, ChannelId, Actor)
+					Injected[Actor] = true
+					return true
+				end)
+
+				if OkProxy and Done then SkipClassic = true end
 			end
 		end
 	end
 
 	if not SkipClassic then
-		for _, Category in {getactors(), typeof(getdeletedactors) == "function" and getdeletedactors() or {}} do
-			if Category then
-				for _, Actor in next, Category do
-					HookActor(Actor)
-				end
+		local OkActors, Actors = pcall(getactors)
+		if OkActors and type(Actors) == "table" then
+			for _, Actor in next, Actors do HookActor(Actor) end
+		end
+
+		if typeof(getdeletedactors) == "function" then
+			local OkDeleted, Deleted = pcall(getdeletedactors)
+			if OkDeleted and type(Deleted) == "table" then
+				for _, Actor in next, Deleted do HookActor(Actor) end
 			end
 		end
-	end
-
-	local StateCreated = typeof(on_actor_state_created) == "RBXScriptSignal" and on_actor_state_created or nil
-	if StateCreated then
-		StateCreated:Connect(function(Actor) HookActor(Actor, "state_created") end)
-	else
-		game.DescendantAdded:Connect(function(Instance)
-			if typeof(Instance) == "Instance" and Instance:IsA("Actor") then
-				HookActor(Instance, "descendant")
-			end
-		end)
 	end
 end
 
@@ -423,50 +413,43 @@ local function HideFromStack(Function)
 end				
 				
 function Hook:HookClientInvoke(Remote, Method, Callback)
-	local Success, Function = pcall(function()
-		return getcallbackvalue(Remote, Method)
-	end)
-
-	--// Some executors like Potassium will throw a error if the Callback value is nil
-	if not Success then return end
-	if not Function then return end
-	
-	--// Test hookfunction
-	local HookSuccess = pcall(function()
-		self:HookFunction(Function, Callback)
-	end)
-	if HookSuccess then return end
-
-	--// Replace callback function otherwise (скрыт из стека, Cobalt-style)
-	local Detour = HideFromStack(function(...)
-		return HookMiddle(Function, Callback, false, ...)
-	end)
-
-	--// Cobalt-style: присвоение OnClientInvoke под identity 2 и env
-	--// оригинального колбэка — игровые __newindex-детекты видят "свой"
-	--// вызов (checkcaller() == false), а не executor.
-	local OriginalEnv = {}
-	pcall(function()
-		OriginalEnv = getfenv(Function)
-	end)
-	local OriginalScript = rawget(OriginalEnv, "script")
-	local Trampoline = trampoline_call or (typeof(syn) == "table" and syn.trampoline_call) or nil
-
-	if Trampoline then
-		pcall(Trampoline, function()
-			Remote[Method] = Detour
-		end, {}, {
-			env = OriginalEnv,
-			script = OriginalScript,
-			identity = 2,
-		})
-	else
-		task.spawn(function()
-			setthreadidentity(2)
-			setfenv(0, OriginalEnv)
-			Remote[Method] = Detour
-		end)
+	--// Реальный колбэк игры
+	local Function
+	if typeof(getcallbackvalue) == "function" then
+		local Ok, Cb = pcall(getcallbackvalue, Remote, Method)
+		if Ok then Function = Cb end
 	end
+
+	if typeof(Function) ~= "function" then
+		local Ok, Cb = pcall(function()
+			return Hook:Index(Remote, Method)
+		end)
+		if Ok then Function = Cb end
+	end
+
+	if typeof(Function) ~= "function" then
+		pcall(function()
+			warn("[SigmaSpy] OnClientInvoke unavailable:", tostring(Remote))
+		end)
+		return false
+	end
+
+	--// Лог + настоящий вызов. Ни newcclosure, ни HookMiddle —
+	--// иначе yield из игры ломается и invoke возвращает nil.
+	local Detour = function(...)
+		pcall(Callback, ...)
+		return Function(...)
+	end
+
+	--// Подмена свойства OnClientInvoke (работает без hookfunction)
+	local OkSet = pcall(function()
+		local Identity = getthreadidentity()
+		local Raised = pcall(setthreadidentity, 2)
+		Remote[Method] = Detour
+		if Raised then pcall(setthreadidentity, Identity) end
+	end)
+
+	return OkSet
 end
 
 function Hook:MultiConnect(Remotes)
@@ -604,8 +587,8 @@ function Hook:LoadMetaHooks(ActorCode: string, ChannelId: number)
 end
 
 function Hook:LoadReceiveHooks()
-	local NoReceiveHooking = Config.NoReceiveHooking
-	local BlackListedServices = Config.BlackListedServices
+	local NoReceiveHooking = Config and Config.NoReceiveHooking
+	local BlackListedServices = (Config and Config.BlackListedServices) or {}
 
 	if NoReceiveHooking then return end
 

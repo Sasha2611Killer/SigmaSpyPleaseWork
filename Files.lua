@@ -254,9 +254,12 @@ end
 
 function Files:MakeActorScript(Scripts, ChannelId: number): string
 	local ActorCode = self:CompileModule(Scripts)
-	ActorCode = "if _G.SIGMA_ACTOR_HOOKED then return end\n_G.SIGMA_ACTOR_HOOKED = true\n" .. ActorCode
-	ActorCode ..= "\nlocal ChannelId, Act = ...\n"
-	ActorCode ..= "if type(ChannelId) ~= 'number' then ChannelId = " .. tostring(ChannelId) .. " end\n"
+	ActorCode = table.concat({
+		"local GV = (typeof(getgenv) == 'function' and getgenv()) or _G",
+		"if GV.SIGMA_ACTOR_HOOKED == true then return end",
+		"GV.SIGMA_ACTOR_HOOKED = true",
+		"",
+	}, "\n") .. ActorCode
 	ActorCode ..= [[
 	local function Say(...)
 		local Parts = {}
@@ -307,6 +310,7 @@ function Files:MakeActorScript(Scripts, ChannelId: number): string
 
 	if not Ok then
 		Say("FAIL:", Err)
+		GV.SIGMA_ACTOR_HOOKED = nil
 	end
 	]]
 	return ActorCode

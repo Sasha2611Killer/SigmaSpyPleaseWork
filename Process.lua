@@ -145,12 +145,12 @@ end
 
 function Process:CheckValue(Value, Ignore: table?, Cache: table?)
     local Type = typeof(Value)
-    Communication:WaitCheck()
 
     if Type == "table" then
         Value = self:DeepCloneTable(Value, Ignore, Cache)
     elseif Type == "Instance" then
-        Value = cloneref(Value)
+        local Ok, Cloned = pcall(cloneref, Value)
+        Value = Ok and Cloned or Value
     end
 
     return Value

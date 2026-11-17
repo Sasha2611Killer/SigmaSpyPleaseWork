@@ -392,9 +392,12 @@ function Hook:BeginHooks()
 			local Method = getnamecallmethod()
 
 			local Ok, ReturnValues = pcall(ProcessRemote, OthOriginal, "__namecall", self, Method, ...)
-			if Ok and ReturnValues then
-				return Process:Unpack(ReturnValues)
-			end
+if not Ok then
+	print("[SigmaSpy] ProcessRemote error:", ReturnValues)
+end
+if Ok and ReturnValues then
+	return Process:Unpack(ReturnValues)
+end
 
 			return OthOriginal(self, ...)
 		end)

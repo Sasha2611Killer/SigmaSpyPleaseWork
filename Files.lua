@@ -273,11 +273,14 @@ function Files:MakeActorScript(Scripts, ChannelId: number): string
 		"oth=", typeof(oth), "getconn=", typeof(getconnections),
 		"setthreadidentity=", typeof(setthreadidentity), "cloneref=", typeof(cloneref))
 
+	_G.SIGMA_ACTOR_DEBUG = true
+
 	local Ok, Err = pcall(function()
 		local ExtraData = {
 			IsActor = true,
 			Actor = typeof(Act) == "Instance" and Act or nil,
 		}
+
 		Libraries.Hook:BeginService(Libraries, ExtraData, ChannelId)
 		Say("BeginService OK")
 
@@ -285,11 +288,21 @@ function Files:MakeActorScript(Scripts, ChannelId: number): string
 			Libraries.Communication:ConsolePrint("Actor connected:", tostring(ChannelId))
 		end)
 
+		--// тот же режим хука, что и в main (в акторе Configuration нет)
+		Libraries.Hook:PushConfig({
+			Configuration = { UseOthHooks = false }
+		})
+
 		Libraries.Hook:BeginHooks()
-				pcall(function()
-		Libraries.Hook:LoadReceiveHooks()
-	end)
 		Say("BeginHooks OK")
+
+		--// receive-хуки отдельно и без блокировки старта
+		task.defer(function()
+			local OkR, ErrR = pcall(function()
+				Libraries.Hook:LoadReceiveHooks()
+			end)
+			Say("ReceiveHooks:", OkR, ErrR)
+		end)
 	end)
 
 	if not Ok then

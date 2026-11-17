@@ -404,6 +404,7 @@ function Hook:BeginHooks()
 
 	--// ставим только когда __namecall реально заменён
 	self:HookRemoteIndexes()
+	pcall(self.HookCallbackAssignments, self)
 	self.HooksLoaded = true
 end
 --// Скрытие функции из стека (Cobalt делает так для детуров).

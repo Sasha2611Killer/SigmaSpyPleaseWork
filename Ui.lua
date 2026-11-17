@@ -1600,7 +1600,9 @@ function Ui:QueueLog(Data)
 	--// Guard: логи из actor-VM могут приходить с Remote == nil
 	--// (инстанс не пережил пересечение границы Lua-state через канал).
 	--// attempt to index nil with 'Parent' в CreateLog лечится здесь.
-	if typeof(Data.Remote) ~= "Instance" then print("[Ui] drop: no remote", Data.Method); return end
+	if typeof(Data.Remote) ~= "Instance" then
+		return
+	end
 
 	local Remote = Data.Remote
 	local Id = Data.Id
@@ -1610,12 +1612,14 @@ function Ui:QueueLog(Data)
 	--// LogRecives / Excluded отсекались только в CreateLog — то есть после
 	--// десериализации и двух DeepClone на КАЖДЫЙ вызов спамера.
 	if Flags:GetFlagValue("Paused") then return end
-	if Data.IsReceive and not Flags:GetFlagValue("LogRecives") then print("[Ui] drop: recive", Data.Method); return end
-	if Data.IsExploit and not Flags:GetFlagValue("LogExploit") then print("[Ui] drop: exploit", Data.Method); return end
+	if Data.IsReceive and not Flags:GetFlagValue("LogRecives") then return end
+	if Data.IsExploit and not Flags:GetFlagValue("LogExploit") then return end
 
-	if Flags:GetFlagValue("IgnoreNil") and Hook:Index(Remote, "Parent") == nil then print("[Ui] drop: nil parent", Data.Method); return end
+	if Flags:GetFlagValue("IgnoreNil") and Hook:Index(Remote, "Parent") == nil then
+		return
+	end
 
-	if Process:GetRemoteData(Id).Excluded then print("[Ui] drop: excluded", Data.Method, Id); return end
+	if Process:GetRemoteData(Id).Excluded then return end
 
 	--// [OPT] Ранний дедуп (IgnoreDuplicates): сравниваем СЫРЫЕ
 	--// сериализованные аргументы до десериализации/DeepClone/UI.

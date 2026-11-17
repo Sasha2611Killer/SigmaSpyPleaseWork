@@ -234,16 +234,26 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 	--// Современная библиотека: getactorstates может возвращать НЕ Actor-инстансы,
 	--// а состояния — треды (run_on_thread) или LuaStateProxy (:Execute).
 	--// Классический getactors() такие акторы не видит.
+	--
+	--// [FIX] SkipClassic ставим ТОЛЬКО если хотя бы один state реально
+	--// захукан. Раньше в thread-ветке SkipClassic = true ставился
+	--// безусловно — pcall(run_on_thread) глушил ошибку, классика
+	--// пропускалась, и акторы вообще не отправлялись.
 	local SkipClassic = false
 	if typeof(getactorstates) == "function" then
 		local Ok, States = pcall(getactorstates)
 		if Ok and type(States) == "table" then
 			local First = next(States)
 			if type(First) == "thread" and typeof(run_on_thread) == "function" then
+				local HookedAny = false
 				for _, State in States do
-					pcall(run_on_thread, State, Code, ChannelId)
+					if pcall(run_on_thread, State, Code, ChannelId) then
+						HookedAny = true
+					end
 				end
-				SkipClassic = true -- состояния захуканы — getactors-проход не нужен
+				if HookedAny then
+					SkipClassic = true
+				end
 			elseif (type(First) == "userdata" or type(First) == "table") and First.IsActorState then
 				local HookedAny = false
 				for _, Proxy in States do
@@ -260,9 +270,19 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
-	--// Текущие + удалённые (неинициализированные) акторы — как в Cobalt
-	if not SkipClassic then
-		for _, Category in {getactors(), typeof(getdeletedactors) == "function" and getdeletedactors() or {}} do
+	--// Текущие + удалённые (неинициализированные) акторы — как в Cobalt.
+	--// [FIX] Дополнительно прогоняем классику, если getactors() непустой,
+	--// даже когда SkipClassic = true — на случай, если state-путь
+	--// захукал не все акторы. run_on_actor идемпотентен по коду.
+	local HasClassicActors = false
+	local ClassicActors = getactors()
+	if ClassicActors and next(ClassicActors) ~= nil then
+		HasClassicActors = true
+	end
+
+	if not SkipClassic or HasClassicActors then
+		local Deleted = typeof(getdeletedactors) == "function" and getdeletedactors() or {}
+		for _, Category in {ClassicActors, Deleted} do
 			if Category then
 				for _, Actor in next, Category do
 					HookActor(Actor)

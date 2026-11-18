@@ -242,63 +242,11 @@ function Files:CreateFont(Name: string, AssetId: string): string?
 	return JsonPath
 end
 
---// Плоские данные -> литерал Lua. nil, если внутри есть несериализуемое
---// (функции, Instance, userdata): так отсекаются модули вроде Files, а
---// Configuration уезжает в актор настоящими данными.
-function Files:SerializeTable(Table: table, Depth: number?): string?
-	Depth = Depth or 0
-	if Depth > 4 then return nil end
-
-	local Parts = {}
-	for Key, Value in next, Table do
-		local KeyType = typeof(Key)
-		local KeyText
-		if KeyType == "string" then
-			KeyText = Key:match("^[%a_][%w_]*$") and Key or ("[%q]"):format(Key)
-		elseif KeyType == "number" then
-			KeyText = "[" .. tostring(Key) .. "]"
-		else
-			return nil
-		end
-
-		local ValueType = typeof(Value)
-		local ValueText
-		if ValueType == "string" then
-			ValueText = ("%q"):format(Value)
-		elseif ValueType == "number" or ValueType == "boolean" then
-			ValueText = tostring(Value)
-		elseif ValueType == "table" then
-			ValueText = self:SerializeTable(Value, Depth + 1)
-		else
-			return nil
-		end
-		if ValueText == nil then return nil end
-
-		Parts[#Parts + 1] = KeyText .. " = " .. ValueText
-	end
-
-	return "{" .. table.concat(Parts, ", ") .. "}"
-end
-
 function Files:CompileModule(Scripts): string
     local Out = "local Libraries = {"
     for Name, Content in Scripts do
-		local ContentType = typeof(Content)
-
-		if ContentType == "string" then
-			Out ..= `	{Name} = (function()\n{Content}\nend)(),\n`
-			continue
-		end
-
-		--// [FIX] Таблицы раньше терялись: в акторе Configuration был nil,
-		--// из-за чего Hook:BeginHooks выбирал другой режим хука, чем в main
-		--// (oth вместо прямого __namecall) и remote'ы актора не логировались.
-		if ContentType == "table" then
-			local Literal = self:SerializeTable(Content)
-			if not Literal then continue end
-			Out ..= `	{Name} = {Literal},\n`
-			continue
-		end
+		if typeof(Content) ~= "string" then continue end
+        Out ..= `	{Name} = (function()\n{Content}\nend)(),\n`
     end
 	Out ..= "}"
     return Out
@@ -306,22 +254,11 @@ end
 
 function Files:MakeActorScript(Scripts, ChannelId: number): string
 	local ActorCode = Files:CompileModule(Scripts)
-
-	--// [FIX] старые вызовы могли передать {ChannelId} таблицей
-	if type(ChannelId) == "table" then
-		ChannelId = ChannelId[1]
-	end
-	ChannelId = tonumber(ChannelId)
-	assert(ChannelId ~= nil, "[SigmaSpy] MakeActorScript: ChannelId должен быть числом")
-
 	ActorCode ..= [[
 	local ExtraData = {
 		IsActor = true
 	}
 	]]
-	--// [FIX] {ChannelId} в обратных кавычках — это интерполяция ЧИСЛА.
-	--// Без скобок в актор уезжал идентификатор ChannelId (глобал = nil),
-	--// из-за чего GetCommChannel падал с "number expected".
 	ActorCode ..= `Libraries.Hook:BeginService(Libraries, ExtraData, {ChannelId})`
 	return ActorCode
 end

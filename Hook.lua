@@ -134,89 +134,66 @@ function Hook:HookMetaMethod(Object: Instance, Call: string, Callback: MetaFunc)
 end
 
 function Hook:PatchFunctions()
-    if (Configuration and Configuration.NoFunctionPatching)
-        or (Config and Config.NoFunctionPatching)
-        or self._Patched then return end
-    self._Patched = true
+	--// Check if this function is disabled in the configuration
+	if (Configuration and Configuration.NoFunctionPatching) or (Config and Config.NoFunctionPatching) then return end
 
-    local _hookfunction = clonefunction(hookfunction)
-    local Unpack = table.unpack or unpack
+	--// [FIX 2026-11-03] КЛАССИКА. clonefunction(clonefunction) УБРАН —
+	--// недопустим и спамил ошибку в консоль (строка с "clonefunction"
+	--// в логе = риск по списку Adonis). Защищённая копия — только
+	--// hookfunction; цели клонируем обычным clonefunction.
+	local _hookfunction = clonefunction(hookfunction)
 
-    local function SafePack(...)
-        return { n = select("#", ...), ... }
-    end
-    local function SafeUnpack(Packed)
-        return Unpack(Packed, 1, Packed.n or #Packed)
-    end
+	local Patches = {
+		[pcall] = function(OldFunc, Func, ...)
+			local Responce = {OldFunc(Func, ...)}
+			local Success, Error = Responce[1], Responce[2]
 
-    local Installed = {}
+			--// Только C stack overflow; обычные ошибки не трогаем
+			if Success == false and type(Error) == "string"
+				and not iscclosure(Func) and Error:find("C stack overflow")
+			then
+				local Tracetable = Error:split(":")
+				local Caller, Line = Tracetable[1], Tracetable[2]
+				local Count = Process:CountMatches(Error, Caller)
 
-    local Patches = {
-        [pcall] = function(OldFunc, Func, ...)
-            local Packed = SafePack(OldFunc(Func, ...))
-            local Success, Error = Packed[1], Packed[2]
-            if Success == false
-                and type(Func) == "function"
-                and type(Error) == "string"
-                and not iscclosure(Func)
-                and string.find(Error, "C stack overflow", 1, true)
-            then
-                local Caller, Line = string.match(Error, "^(.-):(%d+): ")
-                if Caller then
-                    local Count = Process:CountMatches(Error, Caller)
-                    if Count == 196 then
-                        local Prefix = Caller .. ":" .. Line .. ": "
-                        if string.sub(Error, 1, #Prefix) == Prefix then
-                            Packed[2] = Caller .. string.sub(Error, #Prefix + 1)
-                        end
-                    end
-                end
-            end
-            return SafeUnpack(Packed)
-        end,
+				if Count == 196 then
+					Communication:ConsolePrint(`C stack overflow patched, count was {Count}`)
+					Responce[2] = Error:gsub(`{Caller}:{Line}: `, Caller, 1)
+				end
+			end
 
-        [getfenv] = function(OldFunc, Level, ...)
-            local Target = Level
-            if Target == 0 then
-                return OldFunc(0, ...)
-            elseif Target == nil then
-                Target = 3
-            elseif type(Target) == "number" then
-                Target = Target + 2
-            end
-            local ENV = OldFunc(Target, ...)
-            if not checkcaller() and ENV == ExeENV then
-                -- НЕ 999999 — возвращаем глобальный env игры
-                return OldFunc(0, ...)
-            end
-            return ENV
-        end,
-    }
+			return Responce
+		end,
+		[getfenv] = function(OldFunc, Level: number, ...)
+			Level = Level or 1
 
-    for Func, CallBack in Patches do
-        if self.PreviousFunctions[Func] then
-            -- уже захукано раньше — снимаем старый
-            pcall(_hookfunction, Func, self.PreviousFunctions[Func])
-        end
-        local Wrapped = newcclosure(CallBack)
-        local Original
-        Original = _hookfunction(Func, function(...)
-            return Wrapped(Original, ...)
-        end)
-        Installed[Func] = Original
-        self.PreviousFunctions[Func] = Original
-    end
+			if type(Level) == "number" then
+				Level += 2
+			end
 
-    -- отдельная проверка каждого патча
-    local ok1, v1 = pcall(function() return 12345 end)
-    if not (ok1 and v1 == 12345) then
-        pcall(_hookfunction, pcall, Installed[pcall])
-        Installed[pcall] = nil
-        self.PreviousFunctions[pcall] = nil
-        if Communication then
-            Communication:ConsolePrint("pcall patch rolled back")
-        end
-    end
+			local Responce = {OldFunc(Level, ...)}
+			local ENV = Responce[1]
+
+			if not checkcaller() and ENV == ExeENV then
+				Communication:ConsolePrint("ENV escape patched")
+				return OldFunc(999999, ...)
+			end
+
+			return Responce
+		end
+	}
+
+	--// Hook each function
+	for Func, CallBack in Patches do
+		local Original = clonefunction(Func)
+		local Wrapped = newcclosure(CallBack)
+
+		_hookfunction(Func, function(...)
+			return Wrapped(Original, ...)
+		end)
+
+		self.PreviousFunctions[Func] = Original
+	end
 end
 
 function Hook:GetOriginalFunc(Func)

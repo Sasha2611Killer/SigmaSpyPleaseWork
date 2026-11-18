@@ -134,85 +134,89 @@ function Hook:HookMetaMethod(Object: Instance, Call: string, Callback: MetaFunc)
 end
 
 function Hook:PatchFunctions()
-	if (Configuration and Configuration.NoFunctionPatching) or (Config and Config.NoFunctionPatching) then return end
+    if (Configuration and Configuration.NoFunctionPatching)
+        or (Config and Config.NoFunctionPatching)
+        or self._Patched then return end
+    self._Patched = true
 
-	local _hookfunction = hookfunction()
-	local Unpack = table.unpack or unpack
+    local _hookfunction = clonefunction(hookfunction)
+    local Unpack = table.unpack or unpack
 
-	local function SafeUnpack(Packed)
-		return Unpack(Packed, 1, Packed.n or #Packed)
-	end
+    local function SafePack(...)
+        return { n = select("#", ...), ... }
+    end
+    local function SafeUnpack(Packed)
+        return Unpack(Packed, 1, Packed.n or #Packed)
+    end
 
-	local Installed = {}   -- Func -> настоящий оригинал (для отката)
+    local Installed = {}
 
-	local Patches = {
-		[pcall] = function(OldFunc, Func, ...)
-			local Packed = table.pack(OldFunc(Func, ...))
-			local Success, Error = Packed[1], Packed[2]
+    local Patches = {
+        [pcall] = function(OldFunc, Func, ...)
+            local Packed = SafePack(OldFunc(Func, ...))
+            local Success, Error = Packed[1], Packed[2]
+            if Success == false
+                and type(Func) == "function"
+                and type(Error) == "string"
+                and not iscclosure(Func)
+                and string.find(Error, "C stack overflow", 1, true)
+            then
+                local Caller, Line = string.match(Error, "^(.-):(%d+): ")
+                if Caller then
+                    local Count = Process:CountMatches(Error, Caller)
+                    if Count == 196 then
+                        local Prefix = Caller .. ":" .. Line .. ": "
+                        if string.sub(Error, 1, #Prefix) == Prefix then
+                            Packed[2] = Caller .. string.sub(Error, #Prefix + 1)
+                        end
+                    end
+                end
+            end
+            return SafeUnpack(Packed)
+        end,
 
-			if Success == false
-				and type(Func) == "function"
-				and type(Error) == "string"
-				and not iscclosure(Func)
-				and string.find(Error, "C stack overflow", 1, true)
-			then
-				local Caller, Line = string.match(Error, "^(.-):(%d+): ")
-				if Caller then
-					local Count = Process:CountMatches(Error, Caller)
-					if Count == 196 then
-						local Prefix = Caller .. ":" .. Line .. ": "
-						if string.sub(Error, 1, #Prefix) == Prefix then
-							Packed[2] = Caller .. string.sub(Error, #Prefix + 1)
-						end
-					end
-				end
-			end
+        [getfenv] = function(OldFunc, Level, ...)
+            local Target = Level
+            if Target == 0 then
+                return OldFunc(0, ...)
+            elseif Target == nil then
+                Target = 3
+            elseif type(Target) == "number" then
+                Target = Target + 2
+            end
+            local ENV = OldFunc(Target, ...)
+            if not checkcaller() and ENV == ExeENV then
+                -- НЕ 999999 — возвращаем глобальный env игры
+                return OldFunc(0, ...)
+            end
+            return ENV
+        end,
+    }
 
-			return SafeUnpack(Packed)   -- ← ГЛАВНЫЙ ФИКС
-		end,
+    for Func, CallBack in Patches do
+        if self.PreviousFunctions[Func] then
+            -- уже захукано раньше — снимаем старый
+            pcall(_hookfunction, Func, self.PreviousFunctions[Func])
+        end
+        local Wrapped = newcclosure(CallBack)
+        local Original
+        Original = _hookfunction(Func, function(...)
+            return Wrapped(Original, ...)
+        end)
+        Installed[Func] = Original
+        self.PreviousFunctions[Func] = Original
+    end
 
-		[getfenv] = function(OldFunc, Level, ...)
-			local Target = Level
-
-			if Target == 0 then
-				--// 0 = глобальное окружение, кадры хука не важны
-				return OldFunc(0, ...)
-			elseif Target == nil then
-				Target = 3          -- 1 по умолчанию + 2 кадра хука
-			elseif type(Target) == "number" then
-				Target += 2
-			end
-
-			local ENV = OldFunc(Target, ...)
-
-			if not checkcaller() and ENV == ExeENV then
-				return OldFunc(999999, ...)
-			end
-
-			return ENV                 -- ← ГЛАВНЫЙ ФИКС (не {ENV})
-		end,
-	}
-
-	for Func, CallBack in Patches do
-		local Wrapped = newcclosure(CallBack)
-		local Original
-		Original = _hookfunction(Func, function(...)
-			return Wrapped(Original, ...)
-		end)
-		Installed[Func] = Original
-		self.PreviousFunctions[Func] = Original
-	end
-
-	--// Самопроверка + автo-откат: если хук сломал семантику — снимаем
-	local Ok, Value = pcall(function() return 12345 end)
-	if Ok ~= true or Value ~= 12345 then
-		for Func, Original in Installed do
-			pcall(_hookfunction, Func, Original)
-		end
-		if Communication then
-			Communication:ConsolePrint("Function patches rolled back (incompatible executor)")
-		end
-	end
+    -- отдельная проверка каждого патча
+    local ok1, v1 = pcall(function() return 12345 end)
+    if not (ok1 and v1 == 12345) then
+        pcall(_hookfunction, pcall, Installed[pcall])
+        Installed[pcall] = nil
+        self.PreviousFunctions[pcall] = nil
+        if Communication then
+            Communication:ConsolePrint("pcall patch rolled back")
+        end
+    end
 end
 
 function Hook:GetOriginalFunc(Func)

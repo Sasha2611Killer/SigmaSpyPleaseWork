@@ -802,9 +802,8 @@ function Hook:BeginHooks()
 	local IsActorVM = Process ~= nil
 		and Process.ExtraData ~= nil
 		and Process.ExtraData.IsActor == true
-
-	--// [FIX] Who использовался в format, но не был объявлен
 	local Who = IsActorVM and "actor" or "main"
+	pcall(print, ("[SigmaSpy] BeginHooks[%s]: старт"):format(Who))
 
 	local OriginalNameCall
 	local Intercepted = 0
@@ -1170,16 +1169,23 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 			ProcessLib:SetNewReturnSpoofs(Spoofs)
 		end,
 		["BeginHooks"] = function(Config)
+			--// [COBALT] В VM актора — только Incoming. Outgoing-хуки
+			--// (подмена game.__namecall + hookfunction на C-методы) в актёрской
+			--// VM валят клиент моментально. C-функции методов общие, поэтому
+			--// вызовы из актора ловит хук, поставленный в main-VM.
+			if IsActor then
+				pcall(print, ("[SigmaSpy] actor: BeginHooks пропущен (только incoming) — %s")
+					:format(Who))
+				return
+			end
+
 			if Config.PatchFunctions then
 				self:PatchFunctions()
 			end
+
 			self:BeginHooks()
 
-			--// в консоли видно, что актор реально доехал до установки хуков
-			local Message = IsActor
-				and ("[actor] Hooks loaded — " .. Who .. " (режим: " .. tostring(self.HookMode) .. ")")
-				or "Hooks loaded"
-			Communication:ConsolePrint(Message)
+			Communication:ConsolePrint("Hooks loaded")
 		end
 	})
 	

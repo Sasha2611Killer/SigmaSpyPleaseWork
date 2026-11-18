@@ -145,8 +145,12 @@ function Hook:PatchFunctions()
 
 	local Patches = {
 		[pcall] = function(OldFunc, Func, ...)
-			local Responce = {OldFunc(Func, ...)}
-			local Success, Error = Responce[1], Responce[2]
+			--// [FIX] Раньше возвращалась таблица Responce целиком: любой pcall()
+			--// в игре/UI получал ОДИН table вместо (ok, result...). С включёнными
+			--// "function patches" из-за этого ломался OnClientEvent и UI
+			--// (меню перестаёт двигаться).
+			local Results = table.pack(OldFunc(Func, ...))
+			local Success, Error = Results[1], Results[2]
 
 			--// Только C stack overflow; обычные ошибки не трогаем
 			if Success == false and type(Error) == "string"
@@ -158,11 +162,11 @@ function Hook:PatchFunctions()
 
 				if Count == 196 then
 					Communication:ConsolePrint(`C stack overflow patched, count was {Count}`)
-					Responce[2] = Error:gsub(`{Caller}:{Line}: `, Caller, 1)
+					Results[2] = Error:gsub(`{Caller}:{Line}: `, Caller, 1)
 				end
 			end
 
-			return Responce
+			return table.unpack(Results, 1, Results.n)
 		end,
 		[getfenv] = function(OldFunc, Level: number, ...)
 			Level = Level or 1
@@ -171,15 +175,17 @@ function Hook:PatchFunctions()
 				Level += 2
 			end
 
-			local Responce = {OldFunc(Level, ...)}
-			local ENV = Responce[1]
+			--// [FIX] тот же баг: возвращалась таблица вместо окружения,
+			--// то есть getfenv() отдавал table вместо env.
+			local Results = table.pack(OldFunc(Level, ...))
+			local ENV = Results[1]
 
 			if not checkcaller() and ENV == ExeENV then
 				Communication:ConsolePrint("ENV escape patched")
 				return OldFunc(999999, ...)
 			end
 
-			return Responce
+			return table.unpack(Results, 1, Results.n)
 		end
 	}
 

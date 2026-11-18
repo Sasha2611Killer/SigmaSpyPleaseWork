@@ -232,6 +232,10 @@ end
 local ActorErrorFile = "SigmaSpy_actor_error.txt"
 
 local ActorCodeWrapper = [==[
+--// один и тот же код не должен ставиться в одну VM дважды (двойные логи)
+if __SigmaSpyActorRoot then return end
+__SigmaSpyActorRoot = true
+
 pcall(function() __SigmaSpyActorName = %s end)
 local __sigmaOk, __sigmaErr = xpcall(function()
 %s
@@ -323,30 +327,35 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
-	--// 2) если классический путь не дал ничего — состояния акторов
-	if HookedCount == 0 and typeof(getactorstates) == "function" then
+	--// 2) состояния акторов (Cobalt пробует их всегда, а не только когда
+	--// getactors не дал результата: у некоторых сборок нужный VM — именно
+	--// LuaStateProxy, и путь через run_on_actor его не задевает)
+	if typeof(getactorstates) == "function" then
 		local OkStates, States = pcall(getactorstates)
 		if OkStates and typeof(States) == "table" then
 			Log(("actors: getactorstates = %d"):format(#States))
 			local StatePayload = ActorCodeWrapper:format('"actor state"', Code)
-			for _, State in next, States do
+			for Index, State in next, States do
 				if type(State) == "thread" then
 					if typeof(run_on_thread) == "function" then
 						local OkRun, RetRun = pcall(run_on_thread, State, StatePayload, ChannelId)
-						Log(("actor state (thread): run_on_thread ok=%s ret=%s")
-							:format(tostring(OkRun), tostring(RetRun)))
+						Log(("actor state #%d (thread): run_on_thread ok=%s ret=%s")
+							:format(Index, tostring(OkRun), tostring(RetRun)))
 					end
 					continue
 				end
 
 				--// поле может отсутствовать (userdata/proxy) — проверяем безопасно
 				local OkIs, IsState = pcall(function() return State.IsActorState end)
+				Log(("actor state #%d: %s, IsActorState=%s")
+					:format(Index, typeof(State), tostring(OkIs and IsState)))
+
 				if OkIs and IsState then
 					local OkExec, RetExec = pcall(function()
 						return State:Execute(StatePayload, ChannelId, State:GetActors()[1])
 					end)
-					Log(("actor state: Execute ok=%s ret=%s")
-						:format(tostring(OkExec), tostring(RetExec)))
+					Log(("actor state #%d: Execute ok=%s ret=%s")
+						:format(Index, tostring(OkExec), tostring(RetExec)))
 				end
 			end
 		else
@@ -410,10 +419,98 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 	end
 end
 
+--// [CORE FIX 2026-11-18] Хук одного __namecall НЕ видит вызовы вида
+--//   pcall(remote.FireServer, remote, ...)   /   local f = remote.FireServer
+--// Это __index + обычный вызов, namecall в нём не участвует.
+--// Cobalt ловит такие вызовы, потому что хукает САМИ методы
+--// (hookfunction(RemoteEvent.FireServer, ...)), а не только метатаблицу.
+--// Ниже — то же самое; плюс защита от двойного лога, когда один и тот же
+--// вызов виден и main-VM, и VM актора.
+local RemoteClassNames = {
+	RemoteEvent = true,
+	RemoteFunction = true,
+	UnreliableRemoteEvent = true,
+}
+
 local ActorProbeLogged = 0
-local function ProcessRemote(OriginalFunc, MetaMethod: string, self, Method: string, ...)
+local FuncHookProbeLogged = 0
+local RemoteDepth = 0
+local PendingExtra = nil
+
+--// Актор, из которого пришёл вызов (main-VM видит такие вызовы, если
+--// executor хукает метод-функции глобально). Cobalt делает так же:
+--// сначала get_current_actor(), затем предок-Actor у вызывающего скрипта.
+--// Помощники без замыканий: pcall(ReadClassName, self) не аллоцирует.
+local function ReadClassName(Object)
+	return Object.ClassName
+end
+
+local function ReadFullName(Object)
+	return Object:GetFullName()
+end
+
+local function GetCallerActor()
+	local OkCur, Cur = pcall(function()
+		if typeof(get_current_actor) == "function" then
+			return get_current_actor()
+		end
+	end)
+	if OkCur and typeof(Cur) == "Instance" and Cur:IsA("Actor") then
+		return Cur
+	end
+
+	local OkScript, Calling = pcall(getcallingscript)
+	if OkScript and typeof(Calling) == "Instance" then
+		local OkActor, Found = pcall(function()
+			return Calling:FindFirstAncestorOfClass("Actor")
+		end)
+		if OkActor and typeof(Found) == "Instance" then
+			return Found
+		end
+	end
+	return nil
+end
+
+--// Общий Instance (канал связи) — маркер последнего залогированного вызова.
+--// Через него main-VM и VM актора не дублируют одну и ту же запись.
+local StampMarker = nil
+local StampAttribute = "__SigmaSpyLastCall"
+local LastStampKey = nil
+local LastStampTime = 0
+
+local function IsDuplicateCall(Remote, Method: string): boolean
+	local OkName, Name = pcall(ReadFullName, Remote)
+	local Key = (OkName and type(Name) == "string" and Name or tostring(Remote))
+		.. ":" .. tostring(Method)
+	local Now = os.clock()
+
+	if LastStampKey == Key and (Now - LastStampTime) < 0.005 then
+		return true
+	end
+
+	local Marker = StampMarker
+	if typeof(Marker) == "Instance" then
+		local OkShared, Shared = pcall(function() return Marker:GetAttribute(StampAttribute) end)
+		if OkShared and type(Shared) == "string" then
+			local PrevKey, PrevTime = Shared:match("^(.-)|([%d%.]+)$")
+			if PrevKey == Key and tonumber(PrevTime) and math.abs(Now - tonumber(PrevTime)) < 0.005 then
+				return true
+			end
+		end
+		pcall(function()
+			Marker:SetAttribute(StampAttribute, Key .. "|" .. string.format("%.4f", Now))
+		end)
+	end
+
+	LastStampKey, LastStampTime = Key, Now
+	return false
+end
+
+local function ProcessRemoteCore(OriginalFunc, MetaMethod: string, self, Method: string, ...)
 	local Extra = Process.ExtraData
 	local IsActorVM = type(Extra) == "table" and Extra.IsActor == true
+	local ExtraOverride = PendingExtra
+	PendingExtra = nil
 
 	--// для актора: класс remote'а и пропустит ли его Process
 	local ClassName, IsRemoteClass
@@ -445,6 +542,14 @@ local function ProcessRemote(OriginalFunc, MetaMethod: string, self, Method: str
 		--// Вызовы игрового скрипта актора эксплойтными не являются.
 		IsExploit = IsActorVM and false or Caller
 	}
+
+	--// вызов пришёл из актора, но пойман в main-VM — помечаем так же,
+	--// как это делает код внутри актора
+	if ExtraOverride then
+		for Key, Value in next, ExtraOverride do
+			Data[Key] = Value
+		end
+	end
 
 	local Result
 	if IsActorVM then
@@ -490,30 +595,110 @@ local function ProcessRemote(OriginalFunc, MetaMethod: string, self, Method: str
 	return Result
 end
 
+--// Единая точка входа: сюда приходят и __namecall, и хуки самих методов.
+--// RemoteDepth не даёт залогировать один вызов дважды (namecall внутри
+--// вызывает тот же метод-функцию).
+local function ProcessRemote(OriginalFunc, MetaMethod: string, self, Method: string, ...)
+	if RemoteDepth > 0 then return end
+
+	--// дедуп только для remote'ов: namecall'ы прочих классов не трогаем
+	local IsRemoteObject = false
+	if typeof(self) == "Instance" then
+		local OkClass, Class = pcall(ReadClassName, self)
+		IsRemoteObject = OkClass and type(Class) == "string" and RemoteClassNames[Class] == true
+	end
+	if IsRemoteObject and IsDuplicateCall(self, Method) then
+		PendingExtra = nil
+		return
+	end
+
+	RemoteDepth += 1
+	local Ok, Result = pcall(ProcessRemoteCore, OriginalFunc, MetaMethod, self, Method, ...)
+	RemoteDepth -= 1
+
+	if not Ok then
+		PendingExtra = nil
+		pcall(print, ("[SigmaSpy] hook: ProcessRemote ошибка — %s (%s:%s)")
+			:format(tostring(Result), tostring(self), tostring(Method)))
+		return
+	end
+
+	return Result
+end
+
 function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
 	local Remote = Instance.new(ClassName)
 	local Func = Remote[FuncName]
+	if typeof(Func) ~= "function" then return false end
+
+	--// Remotes share the same functions: FireServer у всех RemoteEvent один
+	self.HookedRemoteFunctions = self.HookedRemoteFunctions or {}
+	if table.find(self.HookedRemoteFunctions, Func) then return true end
+	table.insert(self.HookedRemoteFunctions, Func)
+
+	--// [CORE FIX] Именно это Cobalt делает в первую очередь: хук САМОГО
+	--// метода, а не только метатаблицы. Ловит и obj:FireServer(), и
+	--// pcall(obj.FireServer, obj, ...), и local f = obj.FireServer.
 	local OriginalFunc
+	OriginalFunc = self:HookFunction(Func, function(Object, ...)
+		if RemoteDepth > 0 then return end
 
-	--// Remotes will share the same functions
-	--// 	For example FireServer will be identical
-	--// Addionally, this is for __index calls.
-	--// 	A __namecall hook will not detect this
-	OriginalFunc = self:HookFunction(Func, function(self, ...)
-		--// Check if the Object is allowed 
-		if not Process:RemoteAllowed(self, "Send", FuncName) then return end
+		--// Check if the Object is allowed (pcall: хук висит на методе,
+		--// использующемся во всей игре — ошибка не должна ломать вызов)
+		local OkAllowed, Allowed = pcall(Process.RemoteAllowed, Process, Object, "Send", FuncName)
+		if not OkAllowed or not Allowed then return end
 
-		--// Process the remote data
-		return ProcessRemote(OriginalFunc, "__index", self, FuncName, ...)
+		--// вызов из скрипта актора, пойманный в main-VM: помечаем IsActor,
+		--// иначе он выглядел бы как обычный вызов игрового клиента
+		local Extra = Process.ExtraData
+		local IsActorVM = type(Extra) == "table" and Extra.IsActor == true
+		if IsActorVM then
+			if FuncHookProbeLogged < 3 then
+				FuncHookProbeLogged += 1
+				pcall(print, ("[SigmaSpy] actor: func-hook поймал %s:%s (VM актора)")
+					:format(tostring(Object), FuncName))
+			end
+		else
+			local Actor = GetCallerActor()
+			if Actor then
+				local OkName, ActorName = pcall(function() return Actor:GetFullName() end)
+				PendingExtra = {
+					IsActor = true,
+					ActorName = OkName and ActorName or tostring(Actor),
+				}
+
+				if FuncHookProbeLogged < 3 then
+					FuncHookProbeLogged += 1
+					pcall(print, ("[SigmaSpy] func-hook: вызов из актора — %s:%s (актор %s)")
+						:format(tostring(Object), FuncName, tostring(PendingExtra.ActorName)))
+				end
+			end
+		end
+
+		return ProcessRemote(OriginalFunc, "__index", Object, FuncName, ...)
 	end)
+
+	return true
 end
 
 function Hook:HookRemoteIndexes()
 	local RemoteClassData = Process.RemoteClassData
+	local Hooked, Total = 0, 0
+
 	for ClassName, Data in RemoteClassData do
-		local FuncName = Data.Send[1]
-		self:HookRemoteTypeIndex(ClassName, FuncName)
+		for _, FuncName in Data.Send do
+			Total += 1
+			local Ok, Done = pcall(function()
+				return self:HookRemoteTypeIndex(ClassName, FuncName)
+			end)
+			if Ok and Done then
+				Hooked += 1
+			end
+		end
 	end
+
+	pcall(print, ("[SigmaSpy] func-hooks (obj.Method(obj, ...)): подключено %d из %d функций")
+		:format(Hooked, Total))
 end
 
 function Hook:BypassAdonis()
@@ -614,6 +799,17 @@ function Hook:BeginHooks()
 			Intercepted += 1
 			return ProcessRemote(OriginalNameCall, "__namecall", self, Method, ...)
 		end)
+	end
+
+	--// [CORE FIX] Хуки самих методов (Cobalt-подход). Без них вызовы вида
+	--// pcall(remote.FireServer, remote, ...) или local f = remote.FireServer
+	--// не логируются вообще. Ставим в текущей VM: в main — для игровых
+	--// клиентских скриптов, в VM актора — для скриптов внутри Actor.
+	if not self.RemoteFunctionsHooked then
+		self.RemoteFunctionsHooked = pcall(function()
+			self:HookRemoteIndexes()
+			return true
+		end) == true
 	end
 
 	--// [ACTOR] В Lua два вида вызова метода:
@@ -916,6 +1112,18 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 		error(("[SigmaSpy] actor: канал %s не получен: %s"):format(tostring(ChannelId), tostring(Channel)))
 	end
 	Communication:SetChannel(Channel)
+
+	--// [DEDUP] маркер последнего лога — общий Instance для main и VM актора,
+	--// чтобы один и тот же вызов не попал в список дважды
+	do
+		local Marker = Channel
+		if typeof(Marker) ~= "Instance" and type(Marker) == "table" then
+			Marker = rawget(Marker, "Channel")
+		end
+		if typeof(Marker) == "Instance" then
+			StampMarker = Marker
+		end
+	end
 	Communication:AddTypeCallbacks({
 		["RemoteData"] = function(Id: string, RemoteData)
 			ProcessLib:SetRemoteData(Id, RemoteData)

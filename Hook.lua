@@ -73,6 +73,31 @@ local function Merge(Base: table, New: table)
 	end
 end
 
+function Hook:HookFunctionRaw(Func: function, Callback: function): function?
+	local Ok, Original = pcall(hookfunction, Func, Callback)
+	if not Ok or typeof(Original) ~= "function" then
+		pcall(print, ("[SigmaSpy] hookfunction не сработал (%s): %s")
+			:format(tostring(Func), tostring(Original)))
+		return nil
+	end
+	return Original
+end
+
+function Hook:HandleOutgoing(Method: string, Original: function, Object, ...)
+	if typeof(Object) ~= "Instance" then
+		return Original(Object, ...)
+	end
+
+	local ReturnValues = ProcessRemote(Original, "__index", Object, Method, ...)
+	if ReturnValues then
+		return Process:Unpack(ReturnValues)
+	end
+
+	--// ProcessRemote вернул nil: дубликат / не allowed / ошибка.
+	--// Вызов игры терять нельзя.
+	return Original(Object, ...)
+end
+			
 function Hook:Index(Object: Instance, Key: string)
     local identity = getthreadidentity()
     setthreadidentity(8)
@@ -656,25 +681,56 @@ function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
 end
 
 function Hook:HookRemoteIndexes()
-	local RemoteClassData = Process.RemoteClassData
-	local Hooked, Total = 0, 0
+	--// [COBALT] 5 C-функций с шаблонных инстансов. Никаких Send-списков,
+	--// никаких "fireServer"/"fireserver" — только существующие члены.
+	local Probes = {
+		{ Class = "RemoteEvent",           Method = "FireServer"   },
+		{ Class = "UnreliableRemoteEvent", Method = "FireServer"   },
+		{ Class = "RemoteFunction",        Method = "InvokeServer" },
+		{ Class = "BindableEvent",         Method = "Fire"         },
+		{ Class = "BindableFunction",      Method = "Invoke"       },
+	}
 
-	for ClassName, Data in RemoteClassData do
-		for _, FuncName in Data.Send do
-			Total += 1
-			local Ok, Done = pcall(function()
-				return self:HookRemoteTypeIndex(ClassName, FuncName)
-			end)
-			if Ok and Done then
-				Hooked += 1
-			end
+	self.HookedMethods = self.HookedMethods or {}
+
+	local Hooked, Total = 0, #Probes
+
+	for _, Probe in Probes do
+		local OkNew, Inst = pcall(Instance.new, Probe.Class)
+		if not OkNew or typeof(Inst) ~= "Instance" then continue end
+
+		local OkGet, Func = pcall(function() return Inst[Probe.Method] end)
+		pcall(function() Inst:Destroy() end)
+		if not OkGet or typeof(Func) ~= "function" then continue end
+
+		--// ключ — сама функция: повторный хук той же C-функции
+		--// (например, если классы делят реализацию) не делаем
+		if self.HookedMethods[Func] then continue end
+
+		--// имя метода из функции, как в Cobalt; Delta может вернуть ""
+		local Method = Probe.Method
+		local OkInfo, InfoName = pcall(debug.info, Func, "n")
+		if OkInfo and type(InfoName) == "string" and #InfoName > 0 then
+			Method = InfoName
+		end
+
+		local Original
+		Original = self:HookFunctionRaw(Func, function(Object, ...)
+			return self:HandleOutgoing(Method, Original, Object, ...)
+		end)
+
+		if Original then
+			self.HookedMethods[Func] = {
+				Class = Probe.Class,
+				Method = Method,
+				Original = Original,
+			}
+			Hooked += 1
 		end
 	end
 
-	pcall(print, ("[SigmaSpy] func-hooks (obj.Method(obj, ...)): подключено %d из %d функций")
-		:format(Hooked, Total))
+	pcall(print, ("[SigmaSpy] func-hooks: подключено %d из %d"):format(Hooked, Total))
 end
-
 function Hook:BypassAdonis()
 	if typeof(getgc) ~= "function" then return end
 
@@ -780,10 +836,13 @@ function Hook:BeginHooks()
 	--// не логируются вообще. Ставим в текущей VM: в main — для игровых
 	--// клиентских скриптов, в VM актора — для скриптов внутри Actor.
 	if not self.RemoteFunctionsHooked then
-		self.RemoteFunctionsHooked = pcall(function()
+		local Ok = pcall(function()
 			self:HookRemoteIndexes()
 			return true
-		end) == true
+		end)
+		self.RemoteFunctionsHooked = Ok == true
+		pcall(print, ("[SigmaSpy] BeginHooks[%s]: method hooks = %s")
+			:format(Who, tostring(Ok)))
 	end
 
 	--// [ACTOR] В Lua два вида вызова метода:

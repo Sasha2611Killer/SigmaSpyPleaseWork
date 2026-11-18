@@ -137,37 +137,9 @@ function Hook:PatchFunctions()
 	--// Check if this function is disabled in the configuration
 	if (Configuration and Configuration.NoFunctionPatching) or (Config and Config.NoFunctionPatching) then return end
 
-	--// [FIX 2026-11-03] КЛАССИКА. clonefunction(clonefunction) УБРАН —
-	--// недопустим и спамил ошибку в консоль (строка с "clonefunction"
-	--// в логе = риск по списку Adonis). Защищённая копия — только
-	--// hookfunction; цели клонируем обычным clonefunction.
 	local _hookfunction = clonefunction(hookfunction)
 
 	local Patches = {
-		[pcall] = function(OldFunc, Func, ...)
-			--// [FIX] Раньше возвращалась таблица Responce целиком: любой pcall()
-			--// в игре/UI получал ОДИН table вместо (ok, result...). С включёнными
-			--// "function patches" из-за этого ломался OnClientEvent и UI
-			--// (меню перестаёт двигаться).
-			local Results = table.pack(OldFunc(Func, ...))
-			local Success, Error = Results[1], Results[2]
-
-			--// Только C stack overflow; обычные ошибки не трогаем
-			if Success == false and type(Error) == "string"
-				and not iscclosure(Func) and Error:find("C stack overflow")
-			then
-				local Tracetable = Error:split(":")
-				local Caller, Line = Tracetable[1], Tracetable[2]
-				local Count = Process:CountMatches(Error, Caller)
-
-				if Count == 196 then
-					Communication:ConsolePrint(`C stack overflow patched, count was {Count}`)
-					Results[2] = Error:gsub(`{Caller}:{Line}: `, Caller, 1)
-				end
-			end
-
-			return table.unpack(Results, 1, Results.n)
-		end,
 		[getfenv] = function(OldFunc, Level: number, ...)
 			Level = Level or 1
 
@@ -175,8 +147,6 @@ function Hook:PatchFunctions()
 				Level += 2
 			end
 
-			--// [FIX] тот же баг: возвращалась таблица вместо окружения,
-			--// то есть getfenv() отдавал table вместо env.
 			local Results = table.pack(OldFunc(Level, ...))
 			local ENV = Results[1]
 
@@ -627,9 +597,13 @@ local function ProcessRemote(OriginalFunc, MetaMethod: string, self, Method: str
 end
 
 function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
-	local Remote = Instance.new(ClassName)
-	local Func = Remote[FuncName]
-	if typeof(Func) ~= "function" then return false end
+	--// [FIX] Instance.new/__index могут бросить (например "fireserver")
+	local OkNew, Remote = pcall(Instance.new, ClassName)
+	if not OkNew or typeof(Remote) ~= "Instance" then return false end
+
+	local OkIndex, Func = pcall(function() return Remote[FuncName] end)
+	pcall(function() Remote:Destroy() end)
+	if not OkIndex or typeof(Func) ~= "function" then return false end
 
 	--// Remotes share the same functions: FireServer у всех RemoteEvent один
 	self.HookedRemoteFunctions = self.HookedRemoteFunctions or {}

@@ -633,23 +633,23 @@ function Process:PromptDiscordInvite(InviteCode: string)
     })
 end
 
-local ProcessCallback = function(Data: RemoteData, Remote, ...): table?
-	local OriginalFunc = Data.OriginalFunc
-	local Id = Data.Id
-	local Method = Data.Method
+local ProcessCallback = newcclosure(function(Data: RemoteData, Remote, ...): table?
+    local OriginalFunc = Data.OriginalFunc
+    local Id = Data.Id
+    local Method = Data.Method
 
-	local RemoteData = Process:GetRemoteData(Id)
-	if RemoteData.Blocked then return {} end
+    local RemoteData = Process:GetRemoteData(Id)
+    if RemoteData.Blocked then return {} end
 
-	local Spoof = Process:GetRemoteSpoof(Remote, Method, OriginalFunc, ...)
-	if Spoof then return Spoof end
+    local Spoof = Process:GetRemoteSpoof(Remote, Method, OriginalFunc, ...)
+    if Spoof then return Spoof end
 
-	if not OriginalFunc then return end
+    if not OriginalFunc then return end
 
-	return {
-		OriginalFunc(Remote, ...)
-	}
-end
+    return {
+        OriginalFunc(Remote, ...)
+    }
+end)
 
 function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
 	local Method = Data.Method

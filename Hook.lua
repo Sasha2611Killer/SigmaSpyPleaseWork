@@ -681,8 +681,6 @@ function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
 end
 
 function Hook:HookRemoteIndexes()
-	--// [COBALT] 5 C-функций с шаблонных инстансов. Никаких Send-списков,
-	--// никаких "fireServer"/"fireserver" — только существующие члены.
 	local Probes = {
 		{ Class = "RemoteEvent",           Method = "FireServer"   },
 		{ Class = "UnreliableRemoteEvent", Method = "FireServer"   },
@@ -703,34 +701,34 @@ function Hook:HookRemoteIndexes()
 		pcall(function() Inst:Destroy() end)
 		if not OkGet or typeof(Func) ~= "function" then continue end
 
-		--// ключ — сама функция: повторный хук той же C-функции
-		--// (например, если классы делят реализацию) не делаем
 		if self.HookedMethods[Func] then continue end
 
-		--// имя метода из функции, как в Cobalt; Delta может вернуть ""
 		local Method = Probe.Method
 		local OkInfo, InfoName = pcall(debug.info, Func, "n")
 		if OkInfo and type(InfoName) == "string" and #InfoName > 0 then
 			Method = InfoName
 		end
 
-		local Original = self:HookFunctionRaw(Func, function(Object, ...)
-			return self:HandleOutgoing(Method, Original, Object, ...)
+		--// [FIX] Объявляем ДО замыкания. `local Original = hook(... function() ...
+		--// Original ... end)` ловит внешний nil — вызов падал с "attempt to call nil".
+		local Original: UnkFunc?
+		Original = self:HookFunctionRaw(Func, function(Object, ...)
+			return self:HandleOutgoing(Method, Original :: UnkFunc, Object, ...)
 		end)
+
 		if not Original then continue end
 
-		if Original then
-			self.HookedMethods[Func] = {
-				Class = Probe.Class,
-				Method = Method,
-				Original = Original,
-			}
-			Hooked += 1
-		end
+		self.HookedMethods[Func] = {
+			Class = Probe.Class,
+			Method = Method,
+			Original = Original,
+		}
+		Hooked += 1
 	end
 
 	pcall(print, ("[SigmaSpy] func-hooks: подключено %d из %d"):format(Hooked, Total))
 end
+				
 function Hook:BypassAdonis()
 	if typeof(getgc) ~= "function" then return end
 
@@ -804,6 +802,9 @@ function Hook:BeginHooks()
 	local IsActorVM = Process ~= nil
 		and Process.ExtraData ~= nil
 		and Process.ExtraData.IsActor == true
+
+	--// [FIX] Who использовался в format, но не был объявлен
+	local Who = IsActorVM and "actor" or "main"
 
 	local OriginalNameCall
 	local Intercepted = 0
@@ -1233,7 +1234,14 @@ end
 function Hook:LoadHooks(ActorCode: string, ChannelId: number)
 	print(("[SigmaSpy] LoadHooks: старт, канал = %s, ActorCode = %d байт")
 		:format(tostring(ChannelId), #tostring(ActorCode)))
-	self:BypassAdonis()
+
+	--// [DISABLED] BypassAdonis: hookfunction(debug.info) с coroutine.yield
+	--// внутри валит клиент, а на Delta не нужен.
+	--// Если когда-нибудь понадобится — только за флагом Config.EnableAdonisBypass.
+	if Config and Config.EnableAdonisBypass == true then
+		self:BypassAdonis()
+	end
+
 	print("[SigmaSpy] LoadHooks: Adonis bypass ок")
 	self:LoadMetaHooks(ActorCode, ChannelId)
 	print("[SigmaSpy] LoadHooks: мета-хуки и main BeginService ок")

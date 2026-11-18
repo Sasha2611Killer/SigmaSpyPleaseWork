@@ -134,76 +134,65 @@ function Hook:HookMetaMethod(Object: Instance, Call: string, Callback: MetaFunc)
 end
 
 function Hook:PatchFunctions()
+	--// Check if this function is disabled in the configuration
 	if (Configuration and Configuration.NoFunctionPatching) or (Config and Config.NoFunctionPatching) then return end
 
+	--// [FIX 2026-11-03] КЛАССИКА. clonefunction(clonefunction) УБРАН —
+	--// недопустим и спамил ошибку в консоль (строка с "clonefunction"
+	--// в логе = риск по списку Adonis). Защищённая копия — только
+	--// hookfunction; цели клонируем обычным clonefunction.
 	local _hookfunction = clonefunction(hookfunction)
-	local Unpack = table.unpack or unpack
-	local function SafeUnpack(P) return Unpack(P, 1, P.n or #P) end
-
-	local Installed = {}
 
 	local Patches = {
 		[pcall] = function(OldFunc, Func, ...)
-			local P = table.pack(OldFunc(Func, ...))
-			local Success, Error = P[1], P[2]
+			local Responce = {OldFunc(Func, ...)}
+			local Success, Error = Responce[1], Responce[2]
 
-			if Success == false
-				and type(Func) == "function"
-				and type(Error) == "string"
-				and not iscclosure(Func)
-				and string.find(Error, "C stack overflow", 1, true)
+			--// Только C stack overflow; обычные ошибки не трогаем
+			if Success == false and type(Error) == "string"
+				and not iscclosure(Func) and Error:find("C stack overflow")
 			then
-				local Caller, Line = string.match(Error, "^(.-):(%d+): ")
-				if Caller and Process:CountMatches(Error, Caller) == 196 then
-					local Prefix = Caller .. ":" .. Line .. ": "
-					if string.sub(Error, 1, #Prefix) == Prefix then
-						P[2] = Caller .. string.sub(Error, #Prefix + 1)
-					end
+				local Tracetable = Error:split(":")
+				local Caller, Line = Tracetable[1], Tracetable[2]
+				local Count = Process:CountMatches(Error, Caller)
+
+				if Count == 196 then
+					Communication:ConsolePrint(`C stack overflow patched, count was {Count}`)
+					Responce[2] = Error:gsub(`{Caller}:{Line}: `, Caller, 1)
 				end
 			end
 
-			return SafeUnpack(P)                     -- главное
+			return Responce
 		end,
+		[getfenv] = function(OldFunc, Level: number, ...)
+			Level = Level or 1
 
-		[getfenv] = function(OldFunc, Level, ...)
-			local Target = Level
-			if Target == 0 then
-				return OldFunc(0, ...)               -- 0 не сдвигаем
-			elseif Target == nil then
-				Target = 3                           -- 1 по умолчанию + 2 кадра хука
-			elseif type(Target) == "number" then
-				Target += 2
+			if type(Level) == "number" then
+				Level += 2
 			end
 
-			local ENV = OldFunc(Target, ...)
+			local Responce = {OldFunc(Level, ...)}
+			local ENV = Responce[1]
+
 			if not checkcaller() and ENV == ExeENV then
+				Communication:ConsolePrint("ENV escape patched")
 				return OldFunc(999999, ...)
 			end
-			return ENV                                -- не {ENV}
-		end,
+
+			return Responce
+		end
 	}
 
+	--// Hook each function
 	for Func, CallBack in Patches do
+		local Original = clonefunction(Func)
 		local Wrapped = newcclosure(CallBack)
-		local Original
-		Original = _hookfunction(Func, function(...)
+
+		_hookfunction(Func, function(...)
 			return Wrapped(Original, ...)
 		end)
-		Installed[Func] = Original
+
 		self.PreviousFunctions[Func] = Original
-	end
-
-	--// Спасательный круг для собственных библиотек (UI, Process, Communication)
-	getgenv().__RealPcall   = Installed[pcall]
-	getgenv().__RealGetfenv = Installed[getfenv]
-
-	--// Самопроверка + откат
-	local Ok, V = getgenv().__RealPcall(function() return 12345 end)
-	if Ok ~= true or V ~= 12345 then
-		for Func, Original in Installed do
-			pcall(_hookfunction, Func, Original)
-		end
-		Communication:ConsolePrint("Function patches rolled back (incompatible executor)")
 	end
 end
 

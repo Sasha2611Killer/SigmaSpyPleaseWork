@@ -73,7 +73,7 @@ local function Merge(Base: table, New: table)
 	end
 end
 
-function Hook:HookFunctionRaw(Func: function, Callback: function): function?
+function Hook:HookFunctionRaw(Func: UnkFunc, Callback: UnkFunc): UnkFunc?
 	local Ok, Original = pcall(hookfunction, Func, Callback)
 	if not Ok or typeof(Original) ~= "function" then
 		pcall(print, ("[SigmaSpy] hookfunction не сработал (%s): %s")
@@ -83,7 +83,7 @@ function Hook:HookFunctionRaw(Func: function, Callback: function): function?
 	return Original
 end
 
-function Hook:HandleOutgoing(Method: string, Original: function, Object, ...)
+function Hook:HandleOutgoing(Method: string, Original: UnkFunc, Object, ...)
 	if typeof(Object) ~= "Instance" then
 		return Original(Object, ...)
 	end
@@ -714,10 +714,10 @@ function Hook:HookRemoteIndexes()
 			Method = InfoName
 		end
 
-		local Original
-		Original = self:HookFunctionRaw(Func, function(Object, ...)
+		local Original = self:HookFunctionRaw(Func, function(Object, ...)
 			return self:HandleOutgoing(Method, Original, Object, ...)
 		end)
+		if not Original then continue end
 
 		if Original then
 			self.HookedMethods[Func] = {

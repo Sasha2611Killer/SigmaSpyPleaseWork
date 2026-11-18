@@ -586,8 +586,13 @@ function Hook:BeginHooks()
 			))
 	end
 
+	local IsActorVM = Process ~= nil
+		and Process.ExtraData ~= nil
+		and Process.ExtraData.IsActor == true
+
 	local OriginalNameCall
 	local Intercepted = 0
+	local DotIntercepted = 0
 
 	if UseOth then
 		local OthOriginal
@@ -611,12 +616,86 @@ function Hook:BeginHooks()
 		end)
 	end
 
+	--// [ACTOR] В Lua два вида вызова метода:
+	--//   remote:FireServer(...)        -> __namecall
+	--//   pcall(remote.FireServer, remote, ...) -> __index + обычный вызов
+	--// Второй вид идёт МИМО __namecall, поэтому такие remote'ы не логируются
+	--// вообще никогда. В VM актора дополнительно перехватываем __index для
+	--// методов remote'ов (в main не ставим — там это лишняя нагрузка на
+	--// каждое чтение свойства во всей игре).
+	if IsActorVM and not self.IndexHookInstalled then
+		local Metatable = getrawmetatable(game)
+		local OriginalIndex = Metatable.__index
+
+		if typeof(OriginalIndex) == "function" then
+			local RemoteClasses = {
+				RemoteEvent = true,
+				RemoteFunction = true,
+				UnreliableRemoteEvent = true,
+				BindableEvent = true,
+				BindableFunction = true,
+			}
+			local RemoteMethods = {
+				FireServer = true,
+				InvokeServer = true,
+				fireserver = true,
+				invokeserver = true,
+				Fire = true,
+				Invoke = true,
+			}
+
+			--// кэш готовых обёрток: одна на пару (remote, метод)
+			local WrappedCache = setmetatable({}, { __mode = "k" })
+
+			local IndexWrapper
+			IndexWrapper = newcclosure(function(Object, Key)
+				local Value = OriginalIndex(Object, Key)
+
+				if type(Key) ~= "string" or not RemoteMethods[Key] or typeof(Value) ~= "function" then
+					return Value
+				end
+
+				local OkClass, Class = pcall(function() return Object.ClassName end)
+				if not OkClass or not RemoteClasses[Class] then
+					return Value
+				end
+
+				local Cache = WrappedCache[Object]
+				if not Cache then
+					Cache = {}
+					WrappedCache[Object] = Cache
+				end
+
+				local Cached = Cache[Key]
+				if Cached then return Cached end
+
+				local Wrapped = newcclosure(function(Target, ...)
+					DotIntercepted += 1
+					local ReturnValues = ProcessRemote(Value, "__index", Target, Key, ...)
+					if ReturnValues then
+						return Process:Unpack(ReturnValues)
+					end
+					return Value(Target, ...)
+				end)
+
+				Cache[Key] = Wrapped
+				return Wrapped
+			end)
+
+			local OkInstall = pcall(function()
+				setreadonly(Metatable, false)
+				Metatable.__index = IndexWrapper
+				setreadonly(Metatable, true)
+			end)
+
+			self.IndexHookInstalled = OkInstall == true
+			pcall(print, ("[SigmaSpy] actor: перехват __index (вызовы вида obj.FireServer(obj, ...)) = %s")
+				:format(tostring(OkInstall)))
+		end
+	end
+
 	--// Диагностика для актора: сколько вообще namecall'ов прошло через его VM.
 	--// 0 = актор ничего не вызывает (тогда и remote'ов в UI быть не может).
-	local IsActorVM = Process ~= nil
-		and Process.ExtraData ~= nil
-		and Process.ExtraData.IsActor == true
-
 	if IsActorVM then
 		--// Самопроверка сразу после установки: делаем заведомый namecall
 		--// (game:GetService) и смотрим, вырос ли счётчик. Не вырос — хук в
@@ -640,8 +719,8 @@ function Hook:BeginHooks()
 				local Name = __SigmaSpyActorName
 				if type(Name) == "string" and #Name > 0 then Who = Name end
 			end)
-			pcall(print, ("[SigmaSpy] actor: перехвачено namecall за 8с = %d (%s)")
-				:format(Intercepted, Who))
+			pcall(print, ("[SigmaSpy] actor: перехвачено за 8с — namecall %d, dot-call %d (%s)")
+				:format(Intercepted, DotIntercepted, Who))
 		end)
 	end
 

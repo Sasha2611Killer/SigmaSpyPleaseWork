@@ -306,12 +306,23 @@ end
 
 function Files:MakeActorScript(Scripts, ChannelId: number): string
 	local ActorCode = Files:CompileModule(Scripts)
+
+	--// [FIX] старые вызовы могли передать {ChannelId} таблицей
+	if type(ChannelId) == "table" then
+		ChannelId = ChannelId[1]
+	end
+	ChannelId = tonumber(ChannelId)
+	assert(ChannelId ~= nil, "[SigmaSpy] MakeActorScript: ChannelId должен быть числом")
+
 	ActorCode ..= [[
 	local ExtraData = {
 		IsActor = true
 	}
 	]]
-	ActorCode ..= `Libraries.Hook:BeginService(Libraries, ExtraData, ChannelId)`
+	--// [FIX] {ChannelId} в обратных кавычках — это интерполяция ЧИСЛА.
+	--// Без скобок в актор уезжал идентификатор ChannelId (глобал = nil),
+	--// из-за чего GetCommChannel падал с "number expected".
+	ActorCode ..= `Libraries.Hook:BeginService(Libraries, ExtraData, {ChannelId})`
 	return ActorCode
 end
 

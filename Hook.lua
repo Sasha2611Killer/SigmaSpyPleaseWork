@@ -136,7 +136,7 @@ end
 function Hook:PatchFunctions()
 	if (Configuration and Configuration.NoFunctionPatching) or (Config and Config.NoFunctionPatching) then return end
 
-	local _hookfunction = clonefunction(hookfunction)
+	local _hookfunction = hookfunction()
 	local Unpack = table.unpack or unpack
 
 	local function SafeUnpack(Packed)

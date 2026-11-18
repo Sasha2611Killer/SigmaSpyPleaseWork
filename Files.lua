@@ -242,11 +242,63 @@ function Files:CreateFont(Name: string, AssetId: string): string?
 	return JsonPath
 end
 
+--// Плоские данные -> литерал Lua. nil, если внутри есть несериализуемое
+--// (функции, Instance, userdata): так отсекаются модули вроде Files, а
+--// Configuration уезжает в актор настоящими данными.
+function Files:SerializeTable(Table: table, Depth: number?): string?
+	Depth = Depth or 0
+	if Depth > 4 then return nil end
+
+	local Parts = {}
+	for Key, Value in next, Table do
+		local KeyType = typeof(Key)
+		local KeyText
+		if KeyType == "string" then
+			KeyText = Key:match("^[%a_][%w_]*$") and Key or ("[%q]"):format(Key)
+		elseif KeyType == "number" then
+			KeyText = "[" .. tostring(Key) .. "]"
+		else
+			return nil
+		end
+
+		local ValueType = typeof(Value)
+		local ValueText
+		if ValueType == "string" then
+			ValueText = ("%q"):format(Value)
+		elseif ValueType == "number" or ValueType == "boolean" then
+			ValueText = tostring(Value)
+		elseif ValueType == "table" then
+			ValueText = self:SerializeTable(Value, Depth + 1)
+		else
+			return nil
+		end
+		if ValueText == nil then return nil end
+
+		Parts[#Parts + 1] = KeyText .. " = " .. ValueText
+	end
+
+	return "{" .. table.concat(Parts, ", ") .. "}"
+end
+
 function Files:CompileModule(Scripts): string
     local Out = "local Libraries = {"
     for Name, Content in Scripts do
-		if typeof(Content) ~= "string" then continue end
-        Out ..= `	{Name} = (function()\n{Content}\nend)(),\n`
+		local ContentType = typeof(Content)
+
+		if ContentType == "string" then
+			Out ..= `	{Name} = (function()\n{Content}\nend)(),\n`
+			continue
+		end
+
+		--// [FIX] Таблицы раньше терялись: в акторе Configuration был nil,
+		--// из-за чего Hook:BeginHooks выбирал другой режим хука, чем в main
+		--// (oth вместо прямого __namecall) и remote'ы актора не логировались.
+		if ContentType == "table" then
+			local Literal = self:SerializeTable(Content)
+			if not Literal then continue end
+			Out ..= `	{Name} = {Literal},\n`
+			continue
+		end
     end
 	Out ..= "}"
     return Out

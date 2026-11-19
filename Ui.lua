@@ -915,6 +915,11 @@ function Ui:SetFocusedRemote(Data)
 	local Args = Data.Args
 	local Id = Data.Id
 
+	if type(ClassData) ~= "table" then
+		local OkClass, Fetched = pcall(Process.GetClassData, Process, Remote)
+		ClassData = (OkClass and type(Fetched) == "table") and Fetched or {}
+	end
+
 	--// Flags
 	local TableArgs = Flags:GetFlagValue("TableArgs")
 	local NoVariables = Flags:GetFlagValue("NoVariables")

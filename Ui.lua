@@ -1618,7 +1618,7 @@ function Ui:QueueLog(Data)
 	--// десериализации и двух DeepClone на КАЖДЫЙ вызов спамера.
 	if Flags:GetFlagValue("Paused") then return end
 	if Data.IsReceive and not Flags:GetFlagValue("LogRecives") then return end
-	if Data.IsExploit and not Flags:GetFlagValue("LogExploit") then return end
+	if Data.IsExploit and not Data.IsActor and not Flags:GetFlagValue("LogExploit") then return end
 
 	if Flags:GetFlagValue("IgnoreNil") and Hook:Index(Remote, "Parent") == nil then
 		return
@@ -1756,7 +1756,7 @@ function Ui:CreateLog(Data: Log)
 
 	--// Check caller (Ignore exploit calls)
 	local LogExploit = Flags:GetFlagValue("LogExploit")
-	if not LogExploit and IsExploit then return end
+	if not LogExploit and IsExploit and not Data.IsActor then return end
 
 	--// IgnoreNil
 	local IgnoreNil = Flags:GetFlagValue("IgnoreNil")

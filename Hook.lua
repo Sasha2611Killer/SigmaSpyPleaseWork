@@ -219,10 +219,13 @@ function Hook:PatchFunctions()
 		return Unpack(Results, 1, Results.n)
 	end
 
-	local OkWrap, Wrapped = RealPcall(newcclosure, PcallWrapper)
-	if not OkWrap or type(Wrapped) ~= "function" then
-		Wrapped = PcallWrapper
-	end
+	--// [FIX 2026-11-19] БЕЗ newcclosure.
+	--// Проверено на Velocity: внутри newcclosure pcall перестаёт ловить
+	--// ошибки Lua-функций (C-ошибки ловит: «pcall C error OK», а
+	--// «pcall lua error FAIL»). Именно поэтому старый хук-обёртка
+	--// newcclosure(...) терял защиту и ReGui-ошибки вылетали наружу.
+	--// Обычная Lua-обёртка ведёт себя предсказуемо.
+	local Wrapped = PcallWrapper
 
 	--// Куда класть обёртку: настоящий глобальный env + env модуля
 	--// (у некоторых загрузчиков это разные таблицы).
@@ -266,6 +269,16 @@ function Hook:PatchFunctions()
 		end
 		print(Line)
 	end
+
+	--// 0. Builtin pcall вообще ловит Lua-ошибку в этом env?
+	--// Если тут FAIL — в Lua-state уже сидит испорченный pcall,
+	--// и никакая обёртка не поможет (нужен реджойн).
+	local DirectA, DirectB = RealPcall(function()
+		error("SIGMA_DIRECT_PROBE")
+	end)
+	Report("pcall direct", DirectA == false
+		and type(DirectB) == "string"
+		and string.find(DirectB, "SIGMA_DIRECT_PROBE", 1, true) ~= nil, DirectB)
 
 	--// 1. Обёртка вообще используется?
 	local HitsBefore = HooksFired
@@ -343,7 +356,8 @@ function Hook:PatchFunctions()
 		and type(ChunkErr) == "string"
 		and string.find(ChunkErr, "SIGMA_CHUNK_PROBE", 1, true) ~= nil, ChunkErr)
 
-	local Healthy = Checks["pcall returns"]
+	local Healthy = Checks["pcall direct"]
+		and Checks["pcall returns"]
 		and Checks["pcall lua error"]
 		and Checks["pcall native error"]
 		and Checks["pcall C error"]
@@ -353,6 +367,10 @@ function Hook:PatchFunctions()
 
 	--// ── Вердикт ─────────────────────────────────────────────────────────
 	if Live and not Healthy then
+		if not Checks["pcall direct"] then
+			print("[Sigma][Patch] ВНИМАНИЕ: builtin pcall испорчен ещё до нас — перезайди в игру")
+		end
+
 		print("[Sigma][Patch] ROLLBACK: обёртка pcall некорректна — возвращаю ссылки")
 
 		for Env, Old in next, Previous do

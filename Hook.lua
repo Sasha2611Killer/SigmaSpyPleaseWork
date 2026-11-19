@@ -275,6 +275,10 @@ function Hook:PatchFunctions()
 	--// Самопроверка.
 	--// global — то, что реально увидит игра (свежее чтение из env).
 	--// probe  — вызов через тот объект, который мы хукали.
+	local OkE, Ea, Eb = RealPcall(function()
+    return pcall(error, "SIGMA_PROBE")
+end)
+Diag.pcallErrorPath = (OkE == true and Ea == false and Eb == "SIGMA_PROBE")
 	Diag.pcallOk = PcallOk
 	Diag.getfenvOk = GetfenvOk
 	Diag.pcallReturns = select("#", pcall(function() return 1, 2, 3 end))

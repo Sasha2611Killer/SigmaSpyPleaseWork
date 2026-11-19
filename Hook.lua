@@ -9,11 +9,6 @@ local Hook = {
 	OriginalNamecall = nil,
 	OriginalIndex = nil,
 	PreviousFunctions = {},
-	--// [DIAG 2026-11-19] счётчики для проверки "чей VM ловит вызов"
-	NamecallHits = 0,
-	ProbeHits = 0,
-	WatchProbe = false,
-	HookKind = nil,
 	DefaultConfig = {
 		FunctionPatches = true
 	}
@@ -666,72 +661,38 @@ end
 function Hook:RunOnActors(Code: string, ChannelId: number)
 	if not getactors or not run_on_actor then return end
 
-	--// [FIX 2026-11-19] strong-реестр. Weak-ключи (__mode="k") теряли
-	--// Instance-ключ: актор держится только движком, Lua-ссылки нет,
-	--// GC уносил запись → watchdog каждые 3 сек инжектил бандл заново
-	--// (в акторе накапливалось 6+ копий модулей, простыня "hooked:").
-	--// Instance как ключ в обычной таблице — это одна ссылка, утечки нет:
-	--// после Destroy ключ остаётся, но акторов за сессию единицы.
-	self._HookedActors = self._HookedActors or {}
-	self._ActorPending = self._ActorPending or {}
-
-	local function GetKey(Actor)
-		--// GetFullName надёжнее ссылки: переживает клонирование/пересоздание
-		local Ok, Name = pcall(function() return Actor:GetFullName() end)
-		return Ok and Name or Actor
-	end
-
-	local function IsHooked(Actor)
-		return self._HookedActors[GetKey(Actor)] == true
-	end
-
-	local function TryHook(Actor)
-		if not Actor or IsHooked(Actor) then return true end
-
-		local Ok = pcall(run_on_actor, Actor, Code, ChannelId)
-		if Ok then
-			self._HookedActors[GetKey(Actor)] = true
-			print("[Sigma][Actor] hooked:", tostring(Actor))
-		end
-
-		return Ok
-	end
-
+	--// Cobalt-style ретрай: run_on_actor может падать на неинициализированных
+	--// акторах (LuaStateProxy) — повторяем до 10 раз с паузой
 	local function HookActor(Actor)
-		if not Actor then return end
-
-		local Key = GetKey(Actor)
-		if self._HookedActors[Key] or self._ActorPending[Key] then return end
-		self._ActorPending[Key] = true
-
 		task.spawn(function()
+			local Hooked = false
 			local Attempts = 0
-
 			repeat
+				Hooked = pcall(run_on_actor, Actor, Code, ChannelId)
 				Attempts += 1
-				if TryHook(Actor) then break end
-				task.wait(0.25)
-			until Attempts >= 8
-
-			self._ActorPending[Key] = nil
+				if not Hooked then
+					task.wait(0.25)
+				end
+			until Hooked or Attempts > 10
 		end)
 	end
 
 	--// Современная библиотека: getactorstates может возвращать НЕ Actor-инстансы,
 	--// а состояния — треды (run_on_thread) или LuaStateProxy (:Execute).
+	--// Классический getactors() такие акторы не видит.
 	local SkipClassic = false
 	if typeof(getactorstates) == "function" then
 		local Ok, States = pcall(getactorstates)
 		if Ok and type(States) == "table" then
 			local First = next(States)
 			if type(First) == "thread" and typeof(run_on_thread) == "function" then
-				for _, State in next, States do
+				for _, State in States do
 					pcall(run_on_thread, State, Code, ChannelId)
 				end
-				SkipClassic = true
+				SkipClassic = true -- состояния захуканы — getactors-проход не нужен
 			elseif (type(First) == "userdata" or type(First) == "table") and First.IsActorState then
 				local HookedAny = false
-				for _, Proxy in next, States do
+				for _, Proxy in States do
 					if not Proxy.IsActorState then continue end
 					local OkH = pcall(function()
 						return Proxy:Execute(Code, ChannelId, Proxy:GetActors()[1])
@@ -745,6 +706,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
+	--// Текущие + удалённые (неинициализированные) акторы — как в Cobalt
 	if not SkipClassic then
 		for _, Category in {getactors(), typeof(getdeletedactors) == "function" and getdeletedactors() or {}} do
 			if Category then
@@ -755,16 +717,11 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
-	--// Акторы, созданные ПОЗЖЕ
+	--// Акторы, созданные ПОЗЖЕ: нативное событие → fallback DescendantAdded.
+	--// В старой версии такие акторы вообще не хукались.
 	local StateCreated = typeof(on_actor_state_created) == "RBXScriptSignal" and on_actor_state_created or nil
 	if StateCreated then
-		StateCreated:Connect(function(State)
-			if typeof(State) == "Instance" and State:IsA("Actor") then
-				HookActor(State)
-			elseif type(State) == "thread" and typeof(run_on_thread) == "function" then
-				pcall(run_on_thread, State, Code, ChannelId)
-			end
-		end)
+		StateCreated:Connect(HookActor)
 	else
 		game.DescendantAdded:Connect(function(Instance)
 			if typeof(Instance) == "Instance" and Instance:IsA("Actor") then
@@ -772,25 +729,6 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 			end
 		end)
 	end
-
-	--// Watchdog: инстанс актора может появиться раньше своего LuaState
-	if SkipClassic or self._ActorWatchdog then return end
-	self._ActorWatchdog = true
-
-	task.spawn(function()
-		while true do
-			task.wait(3)
-
-			local Ok, List = pcall(getactors)
-			if Ok and type(List) == "table" then
-				for _, Actor in next, List do
-					if not IsHooked(Actor) then
-						HookActor(Actor)
-					end
-				end
-			end
-		end
-	end)
 end
 
 local function ProcessRemote(OriginalFunc, MetaMethod: string, self, Method: string, ...)
@@ -874,761 +812,52 @@ function Hook:BypassAdonis()
 	end)
 end				
 
---// [FIX 2026-11-19] Установка namecall-хука в ТЕКУЩЕМ Lua-state
---// (главный VM или actor-VM) с САМОПРОВЕРКОЙ.
---//
---// Почему не ReplaceMetaMethod напрямую:
---//   в actor-VM Velocity метатаблица Instance отдаётся readonly,
---//   а makewriteable там ОТСУТСТВУЕТ (probe v7: makewrite=nil).
---//   Старый код писал `Metatable[Call] = ...` после setreadonly —
---//   в акторе это тихо не срабатывало, и логи отправки из актора
---//   не появлялись вообще.
---//
---// Функция ставит хук и САМА ПРОВЕРЯЕТ его временным BindableEvent:
---//   1) пишем __namecall (через setreadonly + rawset);
---//   2) если счётчик не вырос — снимаем __namecall и подсовываем
---//      __index-обёртку (fallback namecall -> index);
---//   3) если и это не ловится — возвращаем false и откатываем всё.
---//
---// Handler(OriginalFunc, MetaMethod, Self, Method, ...) — общий обработчик.
-function Hook:InstallNamecallHook(Handler)
-	local GameMT = getrawmetatable(game)
-	if type(GameMT) ~= "table" then
-		return false, "getrawmetatable(game) вернул не таблицу"
-	end
-
-	local OldNamecall = rawget(GameMT, "__namecall")
-	if typeof(OldNamecall) ~= "function" then
-		return false, "__namecall в метатаблице не функция"
-	end
-
-	--// setreadonly есть и в главном VM, и в акторе; makewriteable —
-	--// только в главном, поэтому он опционален.
-	local function Unlock(MT)
-		if type(MT) ~= "table" then return end
-		if typeof(setreadonly) == "function" then
-			pcall(setreadonly, MT, false)
-		end
-		if typeof(makewriteable) == "function" then
-			pcall(makewriteable, MT)
-		end
-	end
-
-	local function Write(MT, Key, Value)
-		Unlock(MT)
-
-		local Ok = pcall(function() MT[Key] = Value end)
-		local Back = false
-		pcall(function() Back = rawget(MT, Key) == Value end)
-
-		if not Back then
-			pcall(rawset, MT, Key, Value)
-			pcall(function() Back = rawget(MT, Key) == Value end)
-		end
-
-		return Back, Ok
-	end
-
-	local function Lock(MT)
-		if type(MT) ~= "table" then return end
-		if typeof(makereadonly) == "function" then
-			pcall(makereadonly, MT)
-		elseif typeof(setreadonly) == "function" then
-			pcall(setreadonly, MT, true)
-		end
-	end
-
-	local Probe = Instance.new("BindableEvent")
-
-	--// ── стратегия 1: __namecall ────────────────────────────────────────
-	local Hits1 = 0
-	local ProbeMethod = nil
-
-	local Wrapper1 = newcclosure(function(Self, ...)
-		if rawequal(Self, Probe) or Self == Probe then
-			Hits1 += 1
-			ProbeMethod = getnamecallmethod()
-			return OldNamecall(Self, ...)
-		end
-
-		local Method = getnamecallmethod()
-		if not Method then
-			--// namecall без имени метода логировать нельзя — пропускаем
-			return OldNamecall(Self, ...)
-		end
-
-		return Handler(OldNamecall, "__namecall", Self, Method, ...)
-	end)
-
-	local Back1 = Write(GameMT, "__namecall", Wrapper1)
-	local FireOk1 = pcall(function() Probe:Fire("probe") end)
-
-	--// Важно: имя метода должно читаться. Если getnamecallmethod()
-	--// в этом VM возвращает nil — стратегия 1 бесполезна (логи без Method).
-	if Back1 and FireOk1 and Hits1 > 0 and ProbeMethod == "Fire" then
-		Lock(GameMT)
-		pcall(function() Probe:Destroy() end)
-		return true, "namecall"
-	end
-
-	--// откат стратегии 1
-	Write(GameMT, "__namecall", OldNamecall)
-	Lock(GameMT)
-
-	--// ── стратегия 2: __namecall = nil + __index-обёртка ────────────────
-	local OldIndex = rawget(GameMT, "__index")
-	if typeof(OldIndex) ~= "function" then
-		pcall(function() Probe:Destroy() end)
-		return false, "__namecall не ловится, а __index не функция"
-	end
-
-	--// имена методов отправки берём из Process.RemoteClassData
-	local SendNames = {}
-	do
-		local RemoteClassData = Process and Process.RemoteClassData
-		if type(RemoteClassData) == "table" then
-			for _, ClassData in next, RemoteClassData do
-				local Send = ClassData and ClassData.Send
-				if type(Send) == "table" then
-					for _, Name in next, Send do
-						SendNames[Name] = true
-					end
-				end
-			end
-		end
-	end
-
-	local Hits2 = 0
-
-	local function WrapMethod(Key, Value)
-		return newcclosure(function(Self, ...)
-			if rawequal(Self, Probe) or Self == Probe then
-				Hits2 += 1
-				return Value(Self, ...)
-			end
-
-			return Handler(Value, "__index", Self, Key, ...)
-		end)
-	end
-
-	local Wrapper2 = newcclosure(function(Self, Key)
-		local Value = OldIndex(Self, Key)
-
-		if SendNames[Key] and typeof(Self) == "Instance" and typeof(Value) == "function" then
-			return WrapMethod(Key, Value)
-		end
-
-		return Value
-	end)
-
-	local BackIdx = Write(GameMT, "__index", Wrapper2)
-	local BackNC = false
-	if BackIdx then
-		BackNC = Write(GameMT, "__namecall", nil)
-	end
-
-	local FireOk2 = false
-	if BackIdx and BackNC then
-		FireOk2 = pcall(function() Probe:Fire("probe") end)
-	end
-
-	if BackIdx and BackNC and FireOk2 and Hits2 > 0 then
-		Lock(GameMT)
-		pcall(function() Probe:Destroy() end)
-		return true, "__index"
-	end
-
-	--// полный откат стратегии 2
-	if BackIdx then
-		pcall(function() rawset(GameMT, "__index", OldIndex) end)
-	end
-	Write(GameMT, "__namecall", OldNamecall)
-	Lock(GameMT)
-
-	--// ── стратегия 3: настоящая метатаблица в getgc/getreg ─────────────
-	--// getrawmetatable в actor-VM может отдавать КОПИЮ метатаблицы.
-	--// Настоящая метатаблица при этом остаётся обычным GC-объектом —
-	--// находим её перебором таблиц с __namecall и проверяем выстрелом.
-	local GcProbed, GcWritten, GcHit = 0, 0, nil
-
-	if typeof(getgc) == "function" then
-		local Candidates, Seen = {}, {}
-		local function AddList(List)
-			if type(List) ~= "table" then return end
-			for _, V in next, List do
-				if type(V) ~= "table" or Seen[V] then continue end
-				Seen[V] = true
-				if typeof(rawget(V, "__namecall")) == "function" then
-					Candidates[#Candidates + 1] = V
-				end
-			end
-		end
-
-		pcall(function() AddList(getgc(true)) end)
-		if typeof(getreg) == "function" then
-			pcall(function() AddList(getreg()) end)
-		end
-
-		for _, TV in next, Candidates do
-			if GcProbed >= 400 then break end
-			GcProbed += 1
-
-			local NC = rawget(TV, "__namecall")
-			if typeof(NC) ~= "function" then continue end
-
-			local Hits3 = 0
-			local ProbeWrap = newcclosure(function(Self, ...)
-				Hits3 += 1
-				return NC(Self, ...)
-			end)
-
-			local Back3 = Write(TV, "__namecall", ProbeWrap)
-			if not Back3 then continue end
-			GcWritten += 1
-
-			local Ok3 = pcall(function() Probe:Fire("probe") end)
-			Write(TV, "__namecall", NC)
-
-			if Ok3 and Hits3 > 0 then
-				GcHit = TV
-
-				--// нашли настоящую метатаблицу — ставим рабочий обработчик
-				local Installed = newcclosure(function(Self, ...)
-					if rawequal(Self, Probe) or Self == Probe then
-						return NC(Self, ...)
-					end
-
-					local Method = getnamecallmethod()
-					if not Method then return NC(Self, ...) end
-
-					return Handler(NC, "__namecall", Self, Method, ...)
-				end)
-
-				if Write(TV, "__namecall", Installed) then
-					Lock(TV)
-					pcall(function() Probe:Destroy() end)
-					return true, "gc"
-				end
-
-				GcHit = nil
-			end
-		end
-	end
-
-	pcall(function() Probe:Destroy() end)
-	return false, string.format(
-		"namecall: write=%s hits=%d method=%s fire=%s | index: write=%s nc_nil=%s hits=%d fire=%s | gc: cand=%d write=%d hit=%s",
-		tostring(Back1), Hits1, tostring(ProbeMethod), tostring(FireOk1),
-		tostring(BackIdx), tostring(BackNC), Hits2, tostring(FireOk2),
-		GcProbed, GcWritten, tostring(GcHit ~= nil))
-end
-
---// [DIAG 2026-11-19] Механизмы установки, которых НЕ было в прошлой сборке:
---//   1) hookmetamethod(game, "__namecall", ...)
---//   2) hookfunction(__namecall)
---//   3) setrawmetatable(game, proxy)
---// Каждый проверяется реальным выстрелом BindableEvent: "успех" = поймали.
-function Hook:TryNamecallAlternatives(Handler)
-	if typeof(getrawmetatable) ~= "function" then
-		return false, "нет getrawmetatable"
-	end
-
-	local GameMT = getrawmetatable(game)
-	if type(GameMT) ~= "table" then
-		return false, "getrawmetatable(game) не table"
-	end
-
-	local OldNamecall = rawget(GameMT, "__namecall")
-	if typeof(OldNamecall) ~= "function" then
-		return false, "__namecall не function"
-	end
-
-	local Probe = Instance.new("BindableEvent")
-	Probe.Name = "SigmaProbeAlt"
-
-	local Hits = 0
-	local function GetMethod()
-		local Ok, Method = pcall(getnamecallmethod)
-		return Ok and Method or nil
-	end
-	local function FireProbe()
-		Hits = 0
-		local Ok = pcall(function() Probe:Fire("probe") end)
-		return Ok and Hits > 0
-	end
-	local function Pass(OriginalCall, Self, ...)
-		if rawequal(Self, Probe) or Self == Probe then
-			Hits += 1
-			return OriginalCall(Self, ...)
-		end
-		local Method = GetMethod()
-		if not Method then
-			return OriginalCall(Self, ...)
-		end
-		return Handler(OriginalCall, "__namecall", Self, Method, ...)
-	end
-
-	--// 1) hookmetamethod
-	do
-		local Tramp = OldNamecall
-		local Ok = false
-		if typeof(hookmetamethod) == "function" then
-			local Success, Result = pcall(hookmetamethod, game, "__namecall", newcclosure(function(Self, ...)
-				return Pass(Tramp, Self, ...)
-			end))
-			Ok = Success
-			if Success and typeof(Result) == "function" then
-				Tramp = Result
-			end
-		end
-
-		if Ok and FireProbe() then
-			pcall(function() Probe:Destroy() end)
-			return true, "hookmetamethod"
-		end
-
-		if Ok then
-			pcall(function()
-				if typeof(restorefunction) == "function" then
-					restorefunction(Tramp)
-				end
-			end)
-		end
-	end
-
-	--// 2) hookfunction(__namecall)
-	do
-		if typeof(hookfunction) == "function" then
-			local Tramp = OldNamecall
-			local Success, Result = pcall(hookfunction, OldNamecall, newcclosure(function(Self, ...)
-				return Pass(Tramp, Self, ...)
-			end))
-			if Success and typeof(Result) == "function" then
-				Tramp = Result
-			end
-
-			if Success and FireProbe() then
-				pcall(function() Probe:Destroy() end)
-				return true, "hookfunction"
-			end
-
-			if Success then
-				pcall(function()
-					if typeof(restorefunction) == "function" then
-						restorefunction(OldNamecall)
-					elseif typeof(hookfunction) == "function" then
-						hookfunction(OldNamecall, Tramp)
-					end
-				end)
-			end
-		end
-	end
-
-	--// 3) setrawmetatable(game, proxy)
-	do
-		if typeof(setrawmetatable) == "function" then
-			local Proxy = {}
-			for Key, Value in next, GameMT do
-				Proxy[Key] = Value
-			end
-			Proxy.__namecall = newcclosure(function(Self, ...)
-				return Pass(OldNamecall, Self, ...)
-			end)
-
-			local Ok = pcall(setrawmetatable, game, Proxy)
-			if Ok and FireProbe() then
-				pcall(function() Probe:Destroy() end)
-				return true, "setrawmetatable"
-			end
-
-			pcall(setrawmetatable, game, GameMT)
-		end
-	end
-
-	pcall(function() Probe:Destroy() end)
-	return false, "alt: hookmetamethod / hookfunction / setrawmetatable — мимо"
-end
-
---// [DIAG 2026-11-19] Диагностика прямо в VM актора. Возвращает текст,
---// каждая строка печатается и уходит в main через comm-канал.
-function Hook:ActorDiagnostics(): string
-	local Lines = {}
-	local function Put(Format, ...)
-		local Ok, Text = pcall(string.format, Format, ...)
-		Lines[#Lines + 1] = Ok and Text or tostring(Format)
-	end
-
-	local Env
-	pcall(function()
-		Env = getgenv()
-	end)
-	Env = Env or _G
-
-	local function ApiType(Name)
-		local Value = Env[Name]
-		if Value == nil then
-			pcall(function() Value = rawget(_G, Name) end)
-		end
-		return typeof(Value)
-	end
-
-	Put(
-		"vm actor=%s main_token=%s hook=%s ident=%s caller=%s parallel=%s",
-		tostring(Env.__SigmaActorVM),
-		tostring(Env.__SigmaMainToken),
-		tostring(self.HookKind),
-		tostring(getthreadidentity and getthreadidentity()),
-		tostring(checkcaller and checkcaller()),
-		tostring(isparallel and isparallel())
-	)
-
-	Put("api " .. table.concat({
-		"getrawmetatable=" .. ApiType("getrawmetatable"),
-		"setrawmetatable=" .. ApiType("setrawmetatable"),
-		"hookmetamethod=" .. ApiType("hookmetamethod"),
-		"hookfunction=" .. ApiType("hookfunction"),
-		"restorefunction=" .. ApiType("restorefunction"),
-		"isfunctionhooked=" .. ApiType("isfunctionhooked"),
-		"getgc=" .. ApiType("getgc"),
-		"getreg=" .. ApiType("getreg"),
-		"setreadonly=" .. ApiType("setreadonly"),
-		"makereadonly=" .. ApiType("makereadonly"),
-		"makewriteable=" .. ApiType("makewriteable"),
-		"getreadonly=" .. ApiType("getreadonly"),
-		"getnamecallmethod=" .. ApiType("getnamecallmethod"),
-		"oth=" .. ApiType("oth"),
-		"getconnections=" .. ApiType("getconnections"),
-		"getscriptfromthread=" .. ApiType("getscriptfromthread"),
-		"getcallingscript=" .. ApiType("getcallingscript"),
-	}, " "))
-
-	local MT = getrawmetatable(game)
-	if type(MT) ~= "table" then
-		Put("mt НЕ table: %s", typeof(MT))
-		return table.concat(Lines, "\n")
-	end
-
-	local OldNC = rawget(MT, "__namecall")
-	local OldIdx = rawget(MT, "__index")
-	local WasReadonly
-	pcall(function()
-		if typeof(getreadonly) == "function" then
-			WasReadonly = getreadonly(MT)
-		end
-	end)
-
-	local function Unlock(Target)
-		if typeof(setreadonly) == "function" then
-			pcall(setreadonly, Target, false)
-		end
-		if typeof(makewriteable) == "function" then
-			pcall(makewriteable, Target)
-		end
-	end
-	local function Lock(Target)
-		if WasReadonly == false then return end
-		if typeof(makereadonly) == "function" then
-			pcall(makereadonly, Target)
-		elseif typeof(setreadonly) == "function" then
-			pcall(setreadonly, Target, true)
-		end
-	end
-
-	local Probe = Instance.new("BindableEvent")
-	Probe.Name = "SigmaProbeActor"
-	local ProbeMT
-	pcall(function()
-		ProbeMT = getrawmetatable(Probe)
-	end)
-
-	Put(
-		"mt type=%s stable=%s same_probe=%s nc=%s idx=%s ni=%s ro=%s",
-		typeof(MT),
-		tostring(getrawmetatable(game) == MT),
-		tostring(ProbeMT == MT),
-		typeof(OldNC),
-		typeof(OldIdx),
-		typeof(rawget(MT, "__newindex")),
-		tostring(WasReadonly)
-	)
-
-	--// T1: __index — свойство Instance вообще проходит через метатаблицу?
-	do
-		local Hits = 0
-		local Wrote = false
-		local Wrapper = newcclosure(function(Self, Key)
-			if rawequal(Self, Probe) or Self == Probe then
-				Hits += 1
-			end
-			return OldIdx(Self, Key)
-		end)
-
-		Unlock(MT)
-		pcall(function()
-			rawset(MT, "__index", Wrapper)
-			Wrote = rawget(MT, "__index") == Wrapper
-		end)
-		local ReadName = pcall(function() return Probe.Name end)
-		local ReadClass = pcall(function() return Probe.ClassName end)
-		pcall(rawset, MT, "__index", OldIdx)
-		Lock(MT)
-
-		Put("T1 index write=%s name=%s class=%s hits=%d", tostring(Wrote), tostring(ReadName), tostring(ReadClass), Hits)
-	end
-
-	--// T2: __namecall — основной путь отправки.
-	do
-		local Hits, Methods = 0, {}
-		local Wrote = false
-		local Fresh = false
-		local Wrapper
-
-		Wrapper = newcclosure(function(Self, ...)
-			Hits += 1
-			if #Methods < 8 then
-				local Ok, Method = pcall(getnamecallmethod)
-				Methods[#Methods + 1] = Ok and tostring(Method) or "err"
-			end
-			return OldNC(Self, ...)
-		end)
-
-		Unlock(MT)
-		pcall(function()
-			rawset(MT, "__namecall", Wrapper)
-			Wrote = rawget(MT, "__namecall") == Wrapper
-		end)
-
-		pcall(function()
-			Fresh = rawget(getrawmetatable(game), "__namecall") == Wrapper
-		end)
-
-		local FullName = pcall(function() return Probe:GetFullName() end)
-		local Fire = pcall(function() Probe:Fire("probe") end)
-		local Service = pcall(function() return game:GetService("Players") end)
-
-		pcall(rawset, MT, "__namecall", OldNC)
-		Lock(MT)
-
-		Put(
-			"T2 namecall write=%s fresh=%s gfn=%s fire=%s svc=%s hits=%d m=%s",
-			tostring(Wrote),
-			tostring(Fresh),
-			tostring(FullName),
-			tostring(Fire),
-			tostring(Service),
-			Hits,
-			table.concat(Methods, ",")
-		)
-	end
-
-	--// T3: hookfunction на самой функции __namecall.
-	do
-		local Hits = 0
-		local Trampoline = OldNC
-		local State = "нет hookfunction"
-
-		if typeof(hookfunction) == "function" then
-			local Success, Result = pcall(hookfunction, OldNC, newcclosure(function(Self, ...)
-				Hits += 1
-				return Trampoline(Self, ...)
-			end))
-			if Success and typeof(Result) == "function" then
-				Trampoline = Result
-			end
-
-			local Hooked = false
-			pcall(function()
-				if typeof(isfunctionhooked) == "function" then
-					Hooked = isfunctionhooked(OldNC) == true
-				end
-			end)
-
-			local Fire = pcall(function() Probe:Fire("probe") end)
-
-			pcall(function()
-				if typeof(restorefunction) == "function" then
-					restorefunction(OldNC)
-				elseif Success then
-					hookfunction(OldNC, Trampoline)
-				end
-			end)
-
-			State = string.format("ok=%s hooked=%s fire=%s", tostring(Success), tostring(Hooked), tostring(Fire))
-		end
-
-		Put("T3 hookfn %s hits=%d", State, Hits)
-	end
-
-	--// T4: hookmetamethod на объекте (не на game).
-	do
-		local Hits = 0
-		local State = "нет hookmetamethod"
-
-		if typeof(hookmetamethod) == "function" then
-			local Trampoline = OldNC
-			local Success, Result = pcall(hookmetamethod, Probe, "__namecall", newcclosure(function(Self, ...)
-				Hits += 1
-				return Trampoline(Self, ...)
-			end))
-			if Success and typeof(Result) == "function" then
-				Trampoline = Result
-			end
-
-			local Hooked = false
-			pcall(function()
-				if typeof(isfunctionhooked) == "function" then
-					Hooked = isfunctionhooked(Trampoline) == true
-				end
-			end)
-
-			local Fire = pcall(function() Probe:Fire("probe") end)
-
-			pcall(function()
-				if Success and typeof(restorefunction) == "function" then
-					restorefunction(Trampoline)
-				end
-			end)
-
-			State = string.format("ok=%s hooked=%s fire=%s", tostring(Success), tostring(Hooked), tostring(Fire))
-		end
-
-		Put("T4 hmm(obj) %s hits=%d", State, Hits)
-	end
-
-	--// T5: setrawmetatable(Probe, proxy) — замена метатаблицы объекта.
-	do
-		local State = "нет setrawmetatable"
-		local Hits = 0
-
-		if typeof(setrawmetatable) == "function" then
-			local Proxy = {}
-			for Key, Value in next, MT do
-				Proxy[Key] = Value
-			end
-			Proxy.__namecall = newcclosure(function(Self, ...)
-				Hits += 1
-				return OldNC(Self, ...)
-			end)
-
-			local Ok = pcall(setrawmetatable, Probe, Proxy)
-			local Fire = false
-			if Ok then
-				Fire = pcall(function() Probe:Fire("probe") end)
-			end
-			pcall(setrawmetatable, Probe, MT)
-
-			State = string.format("ok=%s fire=%s", tostring(Ok), tostring(Fire))
-		end
-
-		Put("T5 setrawmt(obj) %s hits=%d", State, Hits)
-	end
-
-	--// T6: поиск настоящей метатаблицы в getgc / getreg.
-	do
-		local Total, SameFunc, SameTable = 0, 0, 0
-		local Seen = {}
-
-		local function Scan(List)
-			if type(List) ~= "table" then return end
-			for _, Value in next, List do
-				if type(Value) ~= "table" or Seen[Value] then continue end
-				Seen[Value] = true
-				if rawequal(Value, MT) then
-					SameTable += 1
-				end
-				local NC = rawget(Value, "__namecall")
-				if typeof(NC) == "function" then
-					Total += 1
-					if rawequal(NC, OldNC) then
-						SameFunc += 1
-					end
-				end
-			end
-		end
-
-		pcall(function() Scan(getgc(true)) end)
-		pcall(function() Scan(getreg and getreg() or nil) end)
-		Put("T6 gc tables=%d same_fn=%d same_mt=%d", Total, SameFunc, SameTable)
-	end
-
-	--// T7: базовые вещи — не заглушки ли.
-	do
-		local Plain = {}
-		pcall(rawset, Plain, "a", 1)
-		local Locks = "n/a"
-		if typeof(setreadonly) == "function" then
-			pcall(setreadonly, Plain, true)
-			Locks = tostring(not pcall(function() rawset(Plain, "b", 2) end))
-			pcall(setreadonly, Plain, false)
-		end
-		Put("T7 rawget=%s readonly_blocks=%s getmt=%s dbgmt=%s", tostring(rawget(Plain, "a")), Locks, type(getmetatable(Probe)), tostring(debug and typeof(debug.getmetatable)))
-	end
-
-	pcall(function() Probe:Destroy() end)
-	return table.concat(Lines, "\n")
-end
-
 function Hook:BeginHooks()
-	--// [FIX 2026-11-19] Идемпотентность: BeginHooks срабатывает дважды
-	--// (main + actor), повторная установка = двойные логи и двойной
-	--// ProcessRemote на каждый вызов.
+	--// [FIX 2026-11-19] Идемпотентность: BeginHooks срабатывает дважды,
+	--// а повторная установка __namecall = двойные логи и двойная работа
+	--// Process:ProcessRemote на каждый вызов.
 	if self.OriginalNamecall then
 		print("[Sigma][Patch] BeginHooks: __namecall уже стоит — пропускаю")
 		return
 	end
 
-	--// Общий обработчик для всех стратегий.
-	local function Handler(OriginalFunc, MetaMethod, Self, Method, ...)
-		self.NamecallHits = (self.NamecallHits or 0) + 1
-
-		--// [DIAG] ловим "чужие" вызовы (из актора) по имени пробника
-		if self.WatchProbe and typeof(Self) == "Instance" then
-			local OkName, Name = pcall(function()
-				return Self.Name
-			end)
-			if OkName and typeof(Name) == "string" and string.sub(Name, 1, 10) == "SigmaProbe" then
-				self.ProbeHits = (self.ProbeHits or 0) + 1
-				print("[SigmaMain] probe-namecall:", Name, tostring(Method))
-			end
-		end
-
-		local Ok, ReturnValues = pcall(ProcessRemote, OriginalFunc, MetaMethod, Self, Method, ...)
-		if Ok and ReturnValues then
-			return Process:Unpack(ReturnValues)
-		end
-
-		return OriginalFunc(Self, ...)
-	end
-
-	--// oth есть только в главном VM; в акторе его нет.
+	--// Два режима, переключаются Configuration.UseOthHooks:
+	--// true  — oth (отдельный тред): детекторам не виден, но обход
+	--//         стека не видит игру → обе кнопки Decompile показывают
+	--//         один скрипт (fallback getcallingscript).
+	--// false — ПРЯМАЯ ЗАПИСЬ __namecall: обработчик на игровом треде,
+	--//         полная атрибуция (SourceScript/CallerScript различаются).
+	--//         Детекты Adonis нейтрализует BypassAdonis.
+	--// Оба режима распаковывают результат (Unpack) — без этого игра
+	--// получает таблицу вместо значений (зависание камеры).
 	local UseOth = typeof(oth) == "table" and typeof(oth.hook) == "function"
 		and (not Configuration or Configuration.UseOthHooks ~= false)
+
+	local OriginalNameCall
 
 	if UseOth then
 		local OthOriginal
 		OthOriginal = oth.hook(getrawmetatable(game).__namecall, function(self, ...)
-			return Handler(OthOriginal, "__namecall", self, getnamecallmethod(), ...)
+			local Method = getnamecallmethod()
+
+			local Ok, ReturnValues = pcall(ProcessRemote, OthOriginal, "__namecall", self, Method, ...)
+			if Ok and ReturnValues then
+				return Process:Unpack(ReturnValues)
+			end
+
+			return OthOriginal(self, ...)
 		end)
-
-		self.OriginalNamecall = OthOriginal
-		return
-	end
-
-	--// Прямая установка с самопроверкой (работает и в main, и в actor).
-	--// Сначала — механизмы, которых не было в прошлой сборке
-	--// (hookmetamethod / hookfunction / setrawmetatable), потом старый набор.
-	local Ok, Kind = self:TryNamecallAlternatives(Handler)
-	if not Ok then
-		Ok, Kind = self:InstallNamecallHook(Handler)
-	end
-
-	self.HookKind = Ok and tostring(Kind) or nil
-	if Ok then
-		self.OriginalNamecall = true
-		print("[Sigma][Patch] namecall-хук активен: " .. tostring(Kind))
+		OriginalNameCall = OthOriginal
 	else
-		print("[Sigma][Patch] namecall-хук НЕ встал: " .. tostring(Kind))
+		OriginalNameCall = self:ReplaceMetaMethod(game, "__namecall", function(self, ...)
+			local Method = getnamecallmethod()
+			return ProcessRemote(OriginalNameCall, "__namecall", self, Method, ...)
+		end)
 	end
+
+	Merge(self, {
+		OriginalNamecall = OriginalNameCall,
+	})
 end
 --// Скрытие функции из стека (Cobalt делает так для детуров).
 --// Executor без setstackhidden — просто пропускаем (pcall).
@@ -1773,23 +1002,6 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 	Communication:Init(InitData)
 	ProcessLib:Init(InitData)
 
-	--// [DIAG 2026-11-19] В каком VM мы находимся + мост "main -> actor"
-	local IsActorVM = (ExtraData and ExtraData.IsActor) == true
-	do
-		local GlobalEnv
-		pcall(function()
-			GlobalEnv = getgenv()
-		end)
-
-		if type(GlobalEnv) == "table" then
-			if IsActorVM then
-				GlobalEnv.__SigmaActorVM = true
-			else
-				GlobalEnv.__SigmaMainToken = tostring(tick()):gsub("%.", "") .. "_" .. tostring(math.random(100000, 999999))
-			end
-		end
-	end
-
 	--// Communication configuration
 	local Channel, IsWrapped = Communication:GetCommChannel(ChannelId)
 	Communication:SetChannel(Channel)
@@ -1813,51 +1025,6 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 			end
 			self:BeginHooks()
 			Communication:ConsolePrint("Hooks loaded")
-		end,
-		--// ── [DIAG 2026-11-19] мост main -> actor ─────────────────────────
-		--// main кидает "SigmaDiag"/"SigmaEval", актор выполняет и отвечает
-		--// построчно. Пуш нужен ОДИН раз, дальше тесты гоняются из консоли.
-		["SigmaDiag"] = function(Id)
-			if not IsActorVM then return end
-
-			local Text = tostring(self:ActorDiagnostics())
-			for Line in string.gmatch(Text, "[^\n]+") do
-				print("[SigmaDiag] " .. Line)
-				pcall(function()
-					Communication:Communicate("SigmaDiagLine", tostring(Id), Line)
-				end)
-			end
-			pcall(function()
-				Communication:Communicate("SigmaDiagLine", tostring(Id), "__END__")
-			end)
-		end,
-		["SigmaDiagLine"] = function(Id, Line)
-			if IsActorVM then return end
-			print("[SigmaDiag] " .. tostring(Line))
-		end,
-		["SigmaEval"] = function(Id, Code)
-			if not IsActorVM then return end
-
-			local Chunk, LoadError = loadstring(tostring(Code), "SigmaEval")
-			local Ok, Result
-			if Chunk then
-				Ok, Result = pcall(Chunk)
-			else
-				Ok, Result = false, LoadError
-			end
-
-			Result = tostring(Result)
-			if #Result > 1200 then
-				Result = string.sub(Result, 1, 1200) .. "..."
-			end
-
-			pcall(function()
-				Communication:Communicate("SigmaEvalResult", tostring(Id), tostring(Ok), Result)
-			end)
-		end,
-		["SigmaEvalResult"] = function(Id, Ok, Result)
-			if IsActorVM then return end
-			print(string.format("[SigmaEval] %s ok=%s | %s", tostring(Id), tostring(Ok), tostring(Result)))
 		end
 	})
 	
@@ -1867,46 +1034,6 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 
 	--// Hook configuration
 	self:Init(InitData)
-
-	--// [DIAG 2026-11-19] консольные хелперы (только main VM)
-	if not IsActorVM then
-		local GlobalEnv
-		pcall(function()
-			GlobalEnv = getgenv()
-		end)
-
-		if type(GlobalEnv) ~= "table" then
-			GlobalEnv = _G
-		end
-
-		GlobalEnv.SigmaActorDiag = function()
-			local Id = tostring(math.random(100000, 999999))
-			print("[SigmaDiag] request " .. Id)
-			pcall(function()
-				Communication:Communicate("SigmaDiag", Id)
-			end)
-			return Id
-		end
-
-		GlobalEnv.SigmaActorEval = function(Code)
-			local Id = tostring(math.random(100000, 999999))
-			print("[SigmaEval] request " .. Id)
-			pcall(function()
-				Communication:Communicate("SigmaEval", Id, tostring(Code))
-			end)
-			return Id
-		end
-
-		GlobalEnv.SigmaActorStats = function()
-			self.WatchProbe = true
-			print(string.format(
-				"[SigmaMain] namecall_hits=%d probe_hits=%d hook=%s",
-				self.NamecallHits or 0,
-				self.ProbeHits or 0,
-				tostring(self.HookKind)
-			))
-		end
-	end
 
 	if ExtraData and ExtraData.IsActor then
 		Communication:ConsolePrint("Actor connected!")

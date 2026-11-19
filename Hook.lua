@@ -134,8 +134,25 @@ function Hook:HookMetaMethod(Object: Instance, Call: string, Callback: MetaFunc)
 end
 
 function Hook:PatchFunctions()
+	--// [DIAG] Самодиагностика. Потом можно удалить целиком.
+	--// Пишем в getgenv(), чтобы можно было прочитать из консоли после Yes.
+	local Diag = {
+		entered = true,
+		at = os.clock(),
+		executor = (identifyexecutor and identifyexecutor()) or (getexecutorname and getexecutorname()) or "?",
+		noPatch = (Configuration and Configuration.NoFunctionPatching) or (Config and Config.NoFunctionPatching),
+		origPcall = pcall,
+		origGetfenv = getfenv,
+		origGenv0 = getfenv(0),   -- эталон: что getfenv(0) обязан вернуть
+		hooked = {},
+	}
+	getgenv().SigmaDiag = Diag
+
 	--// Check if this function is disabled in the configuration
-	if (Configuration and Configuration.NoFunctionPatching) or (Config and Config.NoFunctionPatching) then return end
+	if Diag.noPatch then
+		print("[Sigma][Patch] SKIPPED: NoFunctionPatching = true")
+		return
+	end
 
 	--// [FIX 2026-11-03] КЛАССИКА. clonefunction(clonefunction) УБРАН —
 	--// недопустим и спамил ошибку в консоль (строка с "clonefunction"
@@ -143,57 +160,140 @@ function Hook:PatchFunctions()
 	--// hookfunction; цели клонируем обычным clonefunction.
 	local _hookfunction = clonefunction(hookfunction)
 
+	--// [FIX 2026-11-19] ГЛАВНОЕ. И pcall, и getfenv ОБЯЗАНЫ возвращать
+	--// unpacked-значения. Раньше возвращался {…} — то есть ОДНА таблица.
+	--// pcall: любая игра получала ok = table (truthy), result = nil
+	--//        → «attempt to index nil» по всему клиенту, спам в консоли,
+	--//        и видимые ошибки, которые pcall должен был проглотить
+	--//        (ReGui SetProperties: AutoSize/ElementStyle).
+	--// getfenv: возвращался {env} вместо env, плюс Level += 2 уезжал
+	--//        на getfenv(0) = глобальное окружение.
+	local Unpack = table.unpack or unpack
+
+	local function SafeUnpack(Packed)
+		return Unpack(Packed, 1, Packed.n or #Packed)
+	end
+
 	local Patches = {
 		[pcall] = function(OldFunc, Func, ...)
-			local Responce = {OldFunc(Func, ...)}
-			local Success, Error = Responce[1], Responce[2]
+			local Packed = table.pack(OldFunc(Func, ...))
+			local Success, Error = Packed[1], Packed[2]
 
 			--// Только C stack overflow; обычные ошибки не трогаем
-			if Success == false and type(Error) == "string"
-				and not iscclosure(Func) and Error:find("C stack overflow")
+			if Success == false
+				and type(Func) == "function"
+				and type(Error) == "string"
+				and not iscclosure(Func)
+				and string.find(Error, "C stack overflow", 1, true)
 			then
-				local Tracetable = Error:split(":")
-				local Caller, Line = Tracetable[1], Tracetable[2]
-				local Count = Process:CountMatches(Error, Caller)
+				local Caller, Line = string.match(Error, "^(.-):(%d+): ")
 
-				if Count == 196 then
-					Communication:ConsolePrint(`C stack overflow patched, count was {Count}`)
-					Responce[2] = Error:gsub(`{Caller}:{Line}: `, Caller, 1)
+				if Caller and Process then
+					local Count = Process:CountMatches(Error, Caller)
+
+					if Count == 196 then
+						local Prefix = Caller .. ":" .. Line .. ": "
+
+						--// string.gsub с путём скрипта как паттерном кидает
+						--// «invalid pattern» прямо из хука — заменяем на
+						--// простое сравнение префикса.
+						if string.sub(Error, 1, #Prefix) == Prefix then
+							Packed[2] = Caller .. string.sub(Error, #Prefix + 1)
+						end
+
+						--// ConsolePrint внутри хука pcall = реентерабельность
+						task.defer(function()
+							Communication:ConsolePrint(`C stack overflow patched, count was {Count}`)
+						end)
+					end
 				end
 			end
 
-			return Responce
+			return SafeUnpack(Packed)
 		end,
-		[getfenv] = function(OldFunc, Level: number, ...)
-			Level = Level or 1
 
-			if type(Level) == "number" then
-				Level += 2
+		[getfenv] = function(OldFunc, Level, ...)
+			local Target = Level
+
+			if Target == 0 then
+				--// 0 = глобальное окружение, кадры хука тут не при чём
+				return OldFunc(0, ...)
+			elseif Target == nil then
+				Target = 3          -- 1 по умолчанию + 2 кадра хука
+			elseif type(Target) == "number" then
+				Target += 2
 			end
 
-			local Responce = {OldFunc(Level, ...)}
-			local ENV = Responce[1]
+			local ENV = OldFunc(Target, ...)
 
 			if not checkcaller() and ENV == ExeENV then
-				Communication:ConsolePrint("ENV escape patched")
+				task.defer(function()
+					Communication:ConsolePrint("ENV escape patched")
+				end)
 				return OldFunc(999999, ...)
 			end
 
-			return Responce
+			return ENV
 		end
 	}
 
 	--// Hook each function
+	local OkStates = {}
+	local Installed = {}
+
 	for Func, CallBack in Patches do
 		local Original = clonefunction(Func)
 		local Wrapped = newcclosure(CallBack)
 
-		_hookfunction(Func, function(...)
-			return Wrapped(Original, ...)
+		local OkHook, ErrHook = pcall(function()
+			_hookfunction(Func, function(...)
+				return Wrapped(Original, ...)
+			end)
 		end)
+
+		OkStates[Func] = OkHook
+		Installed[Func] = Original
+		Diag.hooked[tostring(Func)] = OkHook and "ok" or ("ERROR: " .. tostring(ErrHook))
 
 		self.PreviousFunctions[Func] = Original
 	end
+
+	--// Самопроверка: хук поставился, но семантика поехала?
+	local PcallOk = OkStates[Diag.origPcall]
+	local GetfenvOk = OkStates[Diag.origGetfenv]
+
+	Diag.pcallHooked = PcallOk
+	Diag.getfenvHooked = GetfenvOk
+	Diag.pcallReturns = select("#", pcall(function() return 1, 2, 3 end))
+	Diag.getfenv0IsGenv = (getfenv(0) == Diag.origGenv0)
+	Diag.getfenv0IsGenvRaw = (getfenv(0) == getgenv())
+	Diag.installed = (not PcallOk or Diag.pcallReturns == 4)
+		and (not GetfenvOk or Diag.getfenv0IsGenv)
+
+	print(string.format(
+		"[Sigma][Patch] pcallHooked=%s getfenvHooked=%s returns=%s getfenv0==genv=%s",
+		tostring(PcallOk), tostring(GetfenvOk),
+		tostring(Diag.pcallReturns), tostring(Diag.getfenv0IsGenv)
+	))
+
+	for Func, State in next, Diag.hooked do
+		print("[Sigma][Patch]  hook:", Func, "->", State)
+	end
+
+	--// Если эксплойт хукнул, но сломал контракт — снимаем, чтобы не
+	--// кирпичить pcall/getfenv во всём клиенте.
+	if not Diag.installed then
+		for Func, Original in next, Installed do
+			pcall(_hookfunction, Func, Original)
+		end
+
+		print("[Sigma][Patch] ROLLBACK: семантика сломана, pcall/getfenv восстановлены")
+		return
+	end
+
+	--// Спасательный круг для своих же библиотек (Ui/Process/Communication)
+	getgenv().__SigmaRealPcall = Installed[Diag.origPcall]
+	getgenv().__SigmaRealGetfenv = Installed[Diag.origGetfenv]
 end
 
 function Hook:GetOriginalFunc(Func)
@@ -563,6 +663,9 @@ function Hook:BeginService(Libraries, ExtraData, ChannelId, ...)
 			ProcessLib:SetNewReturnSpoofs(Spoofs)
 		end,
 		["BeginHooks"] = function(Config)
+			--// [DIAG] видно, дошёл ли Yes до этого места
+			print("[Sigma][Patch] BeginHooks fired, PatchFunctions =", tostring(Config.PatchFunctions))
+
 			if Config.PatchFunctions then
 				self:PatchFunctions()
 			end

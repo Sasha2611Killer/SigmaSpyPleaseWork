@@ -135,18 +135,28 @@ end
 
 function Hook:PatchFunctions()
 	--// [DIAG] Самодиагностика. Потом можно удалить целиком.
-	--// Пишем в getgenv(), чтобы можно было прочитать из консоли после Yes.
-	local Diag = {
-		entered = true,
-		at = os.clock(),
-		executor = (identifyexecutor and identifyexecutor()) or (getexecutorname and getexecutorname()) or "?",
-		noPatch = (Configuration and Configuration.NoFunctionPatching) or (Config and Config.NoFunctionPatching),
-		origPcall = pcall,
-		origGetfenv = getfenv,
-		origGenv0 = getfenv(0),   -- эталон: что getfenv(0) обязан вернуть
-		hooked = {},
-	}
+	local Diag = getgenv().SigmaDiag or {}
 	getgenv().SigmaDiag = Diag
+
+	Diag.calls = (Diag.calls or 0) + 1
+	Diag.executor = (identifyexecutor and identifyexecutor()) or (getexecutorname and getexecutorname()) or "?"
+	Diag.pcallStable = (pcall == pcall)
+	Diag.getfenvStable = (getfenv == getfenv)
+	Diag.noPatch = (Configuration and Configuration.NoFunctionPatching) or (Config and Config.NoFunctionPatching)
+
+	--// [FIX 2026-11-19] ИДЕМПОТЕНТНОСТЬ. BeginHooks срабатывает ДВАЖДЫ
+	--// (видно в логе). Без этой защиты getfenv хукался повторно: второй
+	--// хук снимал уже ХУКНУТУЮ функцию, и Level += 2 применялся два раза
+	--// (+4) — игровые скрипты получали чужое окружение или nil.
+	if Diag.calls > 1 then
+		print(`[Sigma][Patch] повторный вызов #{Diag.calls} — пропускаю (хуки уже стоят)`)
+		return
+	end
+
+	Diag.origPcall = pcall
+	Diag.origGetfenv = getfenv
+	Diag.origGenv0 = getfenv(0)   -- эталон: что getfenv(0) обязан вернуть
+	Diag.hooked = {}
 
 	--// Check if this function is disabled in the configuration
 	if Diag.noPatch then
@@ -175,7 +185,7 @@ function Hook:PatchFunctions()
 	end
 
 	local Patches = {
-		[pcall] = function(OldFunc, Func, ...)
+		Pcall = { Target = pcall, Callback = function(OldFunc, Func, ...)
 			local Packed = table.pack(OldFunc(Func, ...))
 			local Success, Error = Packed[1], Packed[2]
 
@@ -210,9 +220,9 @@ function Hook:PatchFunctions()
 			end
 
 			return SafeUnpack(Packed)
-		end,
+		end },
 
-		[getfenv] = function(OldFunc, Level, ...)
+		Getfenv = { Target = getfenv, Callback = function(OldFunc, Level, ...)
 			local Target = Level
 
 			if Target == 0 then
@@ -234,66 +244,71 @@ function Hook:PatchFunctions()
 			end
 
 			return ENV
-		end
+		end }
 	}
 
-	--// Hook each function
-	local OkStates = {}
-	local Installed = {}
+	--// [FIX 2026-11-19] Установка по ИМЕНИ, а не по ключу-функции.
+	--// На Velocity чтение pcall возвращает НОВЫЙ объект каждый раз,
+	--// поэтому OkStates[origPcall] был nil, а «ERROR: nil» означал,
+	--// что хук ставился на одноразовую обёртку.
+	local RealPcall = pcall   -- рабочий pcall для собственных нужд
 
-	for Func, CallBack in Patches do
-		local Original = clonefunction(Func)
-		local Wrapped = newcclosure(CallBack)
+	local function Install(Name, Target, Callback)
+		local Original = clonefunction(Target)
+		local Wrapped = newcclosure(Callback)
 
-		local OkHook, ErrHook = pcall(function()
-			_hookfunction(Func, function(...)
+		local Ok, Err = RealPcall(function()
+			_hookfunction(Target, function(...)
 				return Wrapped(Original, ...)
 			end)
 		end)
 
-		OkStates[Func] = OkHook
-		Installed[Func] = Original
-		Diag.hooked[tostring(Func)] = OkHook and "ok" or ("ERROR: " .. tostring(ErrHook))
+		Diag.hooked[Name] = Ok and "ok" or ("ERROR: " .. tostring(Err))
+		self.PreviousFunctions[Target] = Original
 
-		self.PreviousFunctions[Func] = Original
+		return Ok, Original
 	end
 
-	--// Самопроверка: хук поставился, но семантика поехала?
-	local PcallOk = OkStates[Diag.origPcall]
-	local GetfenvOk = OkStates[Diag.origGetfenv]
+	local PcallOk, PcallOriginal = Install("pcall", Patches.Pcall.Target, Patches.Pcall.Callback)
+	local GetfenvOk, GetfenvOriginal = Install("getfenv", Patches.Getfenv.Target, Patches.Getfenv.Callback)
 
-	Diag.pcallHooked = PcallOk
-	Diag.getfenvHooked = GetfenvOk
+	--// Самопроверка.
+	--// global — то, что реально увидит игра (свежее чтение из env).
+	--// probe  — вызов через тот объект, который мы хукали.
+	Diag.pcallOk = PcallOk
+	Diag.getfenvOk = GetfenvOk
 	Diag.pcallReturns = select("#", pcall(function() return 1, 2, 3 end))
+	Diag.pcallProbeReturns = select("#", Patches.Pcall.Target(function() return 1, 2, 3 end))
 	Diag.getfenv0IsGenv = (getfenv(0) == Diag.origGenv0)
-	Diag.getfenv0IsGenvRaw = (getfenv(0) == getgenv())
-	Diag.installed = (not PcallOk or Diag.pcallReturns == 4)
-		and (not GetfenvOk or Diag.getfenv0IsGenv)
+	Diag.getfenv0Probe = (Patches.Getfenv.Target(0) == Diag.origGenv0)
+	Diag.installed = (Diag.pcallReturns == 4 and Diag.pcallProbeReturns == 4)
+		and (Diag.getfenv0IsGenv and Diag.getfenv0Probe)
 
 	print(string.format(
-		"[Sigma][Patch] pcallHooked=%s getfenvHooked=%s returns=%s getfenv0==genv=%s",
+		"[Sigma][Patch] hookPcall=%s hookGetfenv=%s | returns global/probe=%s/%s | genv0 global/probe=%s/%s | stable pcall/getfenv=%s/%s",
 		tostring(PcallOk), tostring(GetfenvOk),
-		tostring(Diag.pcallReturns), tostring(Diag.getfenv0IsGenv)
+		tostring(Diag.pcallReturns), tostring(Diag.pcallProbeReturns),
+		tostring(Diag.getfenv0IsGenv), tostring(Diag.getfenv0Probe),
+		tostring(Diag.pcallStable), tostring(Diag.getfenvStable)
 	))
 
-	for Func, State in next, Diag.hooked do
-		print("[Sigma][Patch]  hook:", Func, "->", State)
+	for Name, State in next, Diag.hooked do
+		print("[Sigma][Patch]  hook:", Name, "->", State)
 	end
 
-	--// Если эксплойт хукнул, но сломал контракт — снимаем, чтобы не
+	--// Если хук поставился, но семантику сломал — снимаем, чтобы не
 	--// кирпичить pcall/getfenv во всём клиенте.
 	if not Diag.installed then
-		for Func, Original in next, Installed do
-			pcall(_hookfunction, Func, Original)
-		end
+		RealPcall(_hookfunction, Patches.Pcall.Target, PcallOriginal)
+		RealPcall(_hookfunction, Patches.Getfenv.Target, GetfenvOriginal)
 
 		print("[Sigma][Patch] ROLLBACK: семантика сломана, pcall/getfenv восстановлены")
 		return
 	end
 
 	--// Спасательный круг для своих же библиотек (Ui/Process/Communication)
-	getgenv().__SigmaRealPcall = Installed[Diag.origPcall]
-	getgenv().__SigmaRealGetfenv = Installed[Diag.origGetfenv]
+	getgenv().__SigmaRealPcall = PcallOriginal
+	getgenv().__SigmaRealGetfenv = GetfenvOriginal
 end
 
 function Hook:GetOriginalFunc(Func)
@@ -467,6 +482,14 @@ function Hook:BypassAdonis()
 end				
 
 function Hook:BeginHooks()
+	--// [FIX 2026-11-19] Идемпотентность: BeginHooks срабатывает дважды,
+	--// а повторная установка __namecall = двойные логи и двойная работа
+	--// Process:ProcessRemote на каждый вызов.
+	if self.OriginalNamecall then
+		print("[Sigma][Patch] BeginHooks: __namecall уже стоит — пропускаю")
+		return
+	end
+
 	--// Два режима, переключаются Configuration.UseOthHooks:
 	--// true  — oth (отдельный тред): детекторам не виден, но обход
 	--//         стека не видит игру → обе кнопки Decompile показывают

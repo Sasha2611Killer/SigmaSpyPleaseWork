@@ -869,52 +869,296 @@ function Hook:BypassAdonis()
 	end)
 end				
 
+--// [FIX 2026-11-19] Установка namecall-хука в ТЕКУЩЕМ Lua-state
+--// (главный VM или actor-VM) с САМОПРОВЕРКОЙ.
+--//
+--// Почему не ReplaceMetaMethod напрямую:
+--//   в actor-VM Velocity метатаблица Instance отдаётся readonly,
+--//   а makewriteable там ОТСУТСТВУЕТ (probe v7: makewrite=nil).
+--//   Старый код писал `Metatable[Call] = ...` после setreadonly —
+--//   в акторе это тихо не срабатывало, и логи отправки из актора
+--//   не появлялись вообще.
+--//
+--// Функция ставит хук и САМА ПРОВЕРЯЕТ его временным BindableEvent:
+--//   1) пишем __namecall (через setreadonly + rawset);
+--//   2) если счётчик не вырос — снимаем __namecall и подсовываем
+--//      __index-обёртку (fallback namecall -> index);
+--//   3) если и это не ловится — возвращаем false и откатываем всё.
+--//
+--// Handler(OriginalFunc, MetaMethod, Self, Method, ...) — общий обработчик.
+function Hook:InstallNamecallHook(Handler)
+	local GameMT = getrawmetatable(game)
+	if type(GameMT) ~= "table" then
+		return false, "getrawmetatable(game) вернул не таблицу"
+	end
+
+	local OldNamecall = rawget(GameMT, "__namecall")
+	if typeof(OldNamecall) ~= "function" then
+		return false, "__namecall в метатаблице не функция"
+	end
+
+	--// setreadonly есть и в главном VM, и в акторе; makewriteable —
+	--// только в главном, поэтому он опционален.
+	local function Unlock(MT)
+		if type(MT) ~= "table" then return end
+		if typeof(setreadonly) == "function" then
+			pcall(setreadonly, MT, false)
+		end
+		if typeof(makewriteable) == "function" then
+			pcall(makewriteable, MT)
+		end
+	end
+
+	local function Write(MT, Key, Value)
+		Unlock(MT)
+
+		local Ok = pcall(function() MT[Key] = Value end)
+		local Back = false
+		pcall(function() Back = rawget(MT, Key) == Value end)
+
+		if not Back then
+			pcall(rawset, MT, Key, Value)
+			pcall(function() Back = rawget(MT, Key) == Value end)
+		end
+
+		return Back, Ok
+	end
+
+	local function Lock(MT)
+		if type(MT) ~= "table" then return end
+		if typeof(makereadonly) == "function" then
+			pcall(makereadonly, MT)
+		elseif typeof(setreadonly) == "function" then
+			pcall(setreadonly, MT, true)
+		end
+	end
+
+	local Probe = Instance.new("BindableEvent")
+
+	--// ── стратегия 1: __namecall ────────────────────────────────────────
+	local Hits1 = 0
+	local ProbeMethod = nil
+
+	local Wrapper1 = newcclosure(function(Self, ...)
+		if rawequal(Self, Probe) or Self == Probe then
+			Hits1 += 1
+			ProbeMethod = getnamecallmethod()
+			return OldNamecall(Self, ...)
+		end
+
+		local Method = getnamecallmethod()
+		if not Method then
+			--// namecall без имени метода логировать нельзя — пропускаем
+			return OldNamecall(Self, ...)
+		end
+
+		return Handler(OldNamecall, "__namecall", Self, Method, ...)
+	end)
+
+	local Back1 = Write(GameMT, "__namecall", Wrapper1)
+	local FireOk1 = pcall(function() Probe:Fire("probe") end)
+
+	--// Важно: имя метода должно читаться. Если getnamecallmethod()
+	--// в этом VM возвращает nil — стратегия 1 бесполезна (логи без Method).
+	if Back1 and FireOk1 and Hits1 > 0 and ProbeMethod == "Fire" then
+		Lock(GameMT)
+		pcall(function() Probe:Destroy() end)
+		return true, "namecall"
+	end
+
+	--// откат стратегии 1
+	Write(GameMT, "__namecall", OldNamecall)
+	Lock(GameMT)
+
+	--// ── стратегия 2: __namecall = nil + __index-обёртка ────────────────
+	local OldIndex = rawget(GameMT, "__index")
+	if typeof(OldIndex) ~= "function" then
+		pcall(function() Probe:Destroy() end)
+		return false, "__namecall не ловится, а __index не функция"
+	end
+
+	--// имена методов отправки берём из Process.RemoteClassData
+	local SendNames = {}
+	do
+		local RemoteClassData = Process and Process.RemoteClassData
+		if type(RemoteClassData) == "table" then
+			for _, ClassData in next, RemoteClassData do
+				local Send = ClassData and ClassData.Send
+				if type(Send) == "table" then
+					for _, Name in next, Send do
+						SendNames[Name] = true
+					end
+				end
+			end
+		end
+	end
+
+	local Hits2 = 0
+
+	local function WrapMethod(Key, Value)
+		return newcclosure(function(Self, ...)
+			if rawequal(Self, Probe) or Self == Probe then
+				Hits2 += 1
+				return Value(Self, ...)
+			end
+
+			return Handler(Value, "__index", Self, Key, ...)
+		end)
+	end
+
+	local Wrapper2 = newcclosure(function(Self, Key)
+		local Value = OldIndex(Self, Key)
+
+		if SendNames[Key] and typeof(Self) == "Instance" and typeof(Value) == "function" then
+			return WrapMethod(Key, Value)
+		end
+
+		return Value
+	end)
+
+	local BackIdx = Write(GameMT, "__index", Wrapper2)
+	local BackNC = false
+	if BackIdx then
+		BackNC = Write(GameMT, "__namecall", nil)
+	end
+
+	local FireOk2 = false
+	if BackIdx and BackNC then
+		FireOk2 = pcall(function() Probe:Fire("probe") end)
+	end
+
+	if BackIdx and BackNC and FireOk2 and Hits2 > 0 then
+		Lock(GameMT)
+		pcall(function() Probe:Destroy() end)
+		return true, "__index"
+	end
+
+	--// полный откат стратегии 2
+	if BackIdx then
+		pcall(function() rawset(GameMT, "__index", OldIndex) end)
+	end
+	Write(GameMT, "__namecall", OldNamecall)
+	Lock(GameMT)
+
+	--// ── стратегия 3: настоящая метатаблица в getgc/getreg ─────────────
+	--// getrawmetatable в actor-VM может отдавать КОПИЮ метатаблицы.
+	--// Настоящая метатаблица при этом остаётся обычным GC-объектом —
+	--// находим её перебором таблиц с __namecall и проверяем выстрелом.
+	local GcProbed, GcWritten, GcHit = 0, 0, nil
+
+	if typeof(getgc) == "function" then
+		local Candidates, Seen = {}, {}
+		local function AddList(List)
+			if type(List) ~= "table" then return end
+			for _, V in next, List do
+				if type(V) ~= "table" or Seen[V] then continue end
+				Seen[V] = true
+				if typeof(rawget(V, "__namecall")) == "function" then
+					Candidates[#Candidates + 1] = V
+				end
+			end
+		end
+
+		pcall(function() AddList(getgc(true)) end)
+		if typeof(getreg) == "function" then
+			pcall(function() AddList(getreg()) end)
+		end
+
+		for _, TV in next, Candidates do
+			if GcProbed >= 400 then break end
+			GcProbed += 1
+
+			local NC = rawget(TV, "__namecall")
+			if typeof(NC) ~= "function" then continue end
+
+			local Hits3 = 0
+			local ProbeWrap = newcclosure(function(Self, ...)
+				Hits3 += 1
+				return NC(Self, ...)
+			end)
+
+			local Back3 = Write(TV, "__namecall", ProbeWrap)
+			if not Back3 then continue end
+			GcWritten += 1
+
+			local Ok3 = pcall(function() Probe:Fire("probe") end)
+			Write(TV, "__namecall", NC)
+
+			if Ok3 and Hits3 > 0 then
+				GcHit = TV
+
+				--// нашли настоящую метатаблицу — ставим рабочий обработчик
+				local Installed = newcclosure(function(Self, ...)
+					if rawequal(Self, Probe) or Self == Probe then
+						return NC(Self, ...)
+					end
+
+					local Method = getnamecallmethod()
+					if not Method then return NC(Self, ...) end
+
+					return Handler(NC, "__namecall", Self, Method, ...)
+				end)
+
+				if Write(TV, "__namecall", Installed) then
+					Lock(TV)
+					pcall(function() Probe:Destroy() end)
+					return true, "gc"
+				end
+
+				GcHit = nil
+			end
+		end
+	end
+
+	pcall(function() Probe:Destroy() end)
+	return false, string.format(
+		"namecall: write=%s hits=%d method=%s fire=%s | index: write=%s nc_nil=%s hits=%d fire=%s | gc: cand=%d write=%d hit=%s",
+		tostring(Back1), Hits1, tostring(ProbeMethod), tostring(FireOk1),
+		tostring(BackIdx), tostring(BackNC), Hits2, tostring(FireOk2),
+		GcProbed, GcWritten, tostring(GcHit ~= nil))
+end
+
 function Hook:BeginHooks()
-	--// [FIX 2026-11-19] Идемпотентность: BeginHooks срабатывает дважды,
-	--// а повторная установка __namecall = двойные логи и двойная работа
-	--// Process:ProcessRemote на каждый вызов.
+	--// [FIX 2026-11-19] Идемпотентность: BeginHooks срабатывает дважды
+	--// (main + actor), повторная установка = двойные логи и двойной
+	--// ProcessRemote на каждый вызов.
 	if self.OriginalNamecall then
 		print("[Sigma][Patch] BeginHooks: __namecall уже стоит — пропускаю")
 		return
 	end
 
-	--// Два режима, переключаются Configuration.UseOthHooks:
-	--// true  — oth (отдельный тред): детекторам не виден, но обход
-	--//         стека не видит игру → обе кнопки Decompile показывают
-	--//         один скрипт (fallback getcallingscript).
-	--// false — ПРЯМАЯ ЗАПИСЬ __namecall: обработчик на игровом треде,
-	--//         полная атрибуция (SourceScript/CallerScript различаются).
-	--//         Детекты Adonis нейтрализует BypassAdonis.
-	--// Оба режима распаковывают результат (Unpack) — без этого игра
-	--// получает таблицу вместо значений (зависание камеры).
+	--// Общий обработчик для всех стратегий.
+	local function Handler(OriginalFunc, MetaMethod, Self, Method, ...)
+		local Ok, ReturnValues = pcall(ProcessRemote, OriginalFunc, MetaMethod, Self, Method, ...)
+		if Ok and ReturnValues then
+			return Process:Unpack(ReturnValues)
+		end
+
+		return OriginalFunc(Self, ...)
+	end
+
+	--// oth есть только в главном VM; в акторе его нет.
 	local UseOth = typeof(oth) == "table" and typeof(oth.hook) == "function"
 		and (not Configuration or Configuration.UseOthHooks ~= false)
-
-	local OriginalNameCall
 
 	if UseOth then
 		local OthOriginal
 		OthOriginal = oth.hook(getrawmetatable(game).__namecall, function(self, ...)
-			local Method = getnamecallmethod()
-
-			local Ok, ReturnValues = pcall(ProcessRemote, OthOriginal, "__namecall", self, Method, ...)
-			if Ok and ReturnValues then
-				return Process:Unpack(ReturnValues)
-			end
-
-			return OthOriginal(self, ...)
+			return Handler(OthOriginal, "__namecall", self, getnamecallmethod(), ...)
 		end)
-		OriginalNameCall = OthOriginal
-	else
-		OriginalNameCall = self:ReplaceMetaMethod(game, "__namecall", function(self, ...)
-			local Method = getnamecallmethod()
-			return ProcessRemote(OriginalNameCall, "__namecall", self, Method, ...)
-		end)
+
+		self.OriginalNamecall = OthOriginal
+		return
 	end
 
-	Merge(self, {
-		OriginalNamecall = OriginalNameCall,
-	})
+	--// Прямая установка с самопроверкой (работает и в main, и в actor).
+	local Ok, Kind = self:InstallNamecallHook(Handler)
+	if Ok then
+		self.OriginalNamecall = Kind
+		print("[Sigma][Patch] namecall-хук активен: " .. tostring(Kind))
+	else
+		print("[Sigma][Patch] namecall-хук НЕ встал: " .. tostring(Kind))
+	end
 end
 --// Скрытие функции из стека (Cobalt делает так для детуров).
 --// Executor без setstackhidden — просто пропускаем (pcall).

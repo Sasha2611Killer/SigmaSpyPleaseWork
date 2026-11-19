@@ -134,6 +134,15 @@ function Hook:HookMetaMethod(Object: Instance, Call: string, Callback: MetaFunc)
 end
 
 function Hook:PatchFunctions()
+	--// [FIX 2026-11-19] ИДЕМПОТЕНТНОСТЬ (по модулю).
+	--// getgenv() на Velocity не сохраняется между вызовами (каждый вызов
+	--// может отдавать новую таблицу), поэтому счётчик в SigmaDiag не
+	--// сработал. Флаг на самом модуле переживает повторный BeginHooks.
+	if self._PatchedFunctions then
+		print("[Sigma][Patch] повторный вызов PatchFunctions — пропускаю (хуки уже стоят)")
+		return
+	end
+
 	--// [DIAG] Самодиагностика. Потом можно удалить целиком.
 	local Diag = getgenv().SigmaDiag or {}
 	getgenv().SigmaDiag = Diag
@@ -144,10 +153,6 @@ function Hook:PatchFunctions()
 	Diag.getfenvStable = (getfenv == getfenv)
 	Diag.noPatch = (Configuration and Configuration.NoFunctionPatching) or (Config and Config.NoFunctionPatching)
 
-	--// [FIX 2026-11-19] ИДЕМПОТЕНТНОСТЬ. BeginHooks срабатывает ДВАЖДЫ
-	--// (видно в логе). Без этой защиты getfenv хукался повторно: второй
-	--// хук снимал уже ХУКНУТУЮ функцию, и Level += 2 применялся два раза
-	--// (+4) — игровые скрипты получали чужое окружение или nil.
 	if Diag.calls > 1 then
 		print(`[Sigma][Patch] повторный вызов #{Diag.calls} — пропускаю (хуки уже стоят)`)
 		return
@@ -247,10 +252,9 @@ function Hook:PatchFunctions()
 		end }
 	}
 
-	--// [FIX 2026-11-19] Установка по ИМЕНИ, а не по ключу-функции.
-	--// На Velocity чтение pcall возвращает НОВЫЙ объект каждый раз,
-	--// поэтому OkStates[origPcall] был nil, а «ERROR: nil» означал,
-	--// что хук ставился на одноразовую обёртку.
+	--// [FIX 2026-11-19] Установка по ИМЕНИ, а не по ключу-функции:
+	--// на Velocity hookfunction на C-функциях возвращает мусор вместо
+	--// оригинала, поэтому привязываться к объекту-ключу нельзя.
 	local RealPcall = pcall   -- рабочий pcall для собственных нужд
 
 	local function Install(Name, Target, Callback)
@@ -272,27 +276,65 @@ function Hook:PatchFunctions()
 	local PcallOk, PcallOriginal = Install("pcall", Patches.Pcall.Target, Patches.Pcall.Callback)
 	local GetfenvOk, GetfenvOriginal = Install("getfenv", Patches.Getfenv.Target, Patches.Getfenv.Callback)
 
-	--// Самопроверка.
+	--// Самопроверка. ВСЁ через RealPcall: если хук встал «полуживым»,
+	--// проверка не должна сама уронить PatchFunctions (иначе спай
+	--// останется без BeginHooks — ровно та поломка, что была раньше).
 	--// global — то, что реально увидит игра (свежее чтение из env).
 	--// probe  — вызов через тот объект, который мы хукали.
-	local OkE, Ea, Eb = RealPcall(function()
-    return pcall(error, "SIGMA_PROBE")
-end)
-Diag.pcallErrorPath = (OkE == true and Ea == false and Eb == "SIGMA_PROBE")
 	Diag.pcallOk = PcallOk
 	Diag.getfenvOk = GetfenvOk
-	Diag.pcallReturns = select("#", pcall(function() return 1, 2, 3 end))
-	Diag.pcallProbeReturns = select("#", Patches.Pcall.Target(function() return 1, 2, 3 end))
-	Diag.getfenv0IsGenv = (getfenv(0) == Diag.origGenv0)
-	Diag.getfenv0Probe = (Patches.Getfenv.Target(0) == Diag.origGenv0)
-	Diag.installed = (Diag.pcallReturns == 4 and Diag.pcallProbeReturns == 4)
-		and (Diag.getfenv0IsGenv and Diag.getfenv0Probe)
+
+	local OkN, Count = RealPcall(function()
+		return select("#", pcall(function() return 1, 2, 3 end))
+	end)
+	Diag.pcallReturns = OkN and Count or "THROW"
+
+	local OkN2, Count2 = RealPcall(function()
+		return select("#", Patches.Pcall.Target(function() return 1, 2, 3 end))
+	end)
+	Diag.pcallProbeReturns = OkN2 and Count2 or "THROW"
+
+	--// [FIX 2026-11-19] ГЛАВНАЯ проверка: pcall ОБЯЗАН ловить ошибку.
+	--// На Velocity hookfunction на C-функциях отдаёт мусор, и хук может
+	--// встать без защиты: значения вернёт, а ошибку пропустит наружу.
+	--// Тогда любая игра и ReGui получают выброшенную ошибку вместо false.
+	local OkE, Ea, Eb = RealPcall(function()
+		return pcall(error, "SIGMA_PROBE")
+	end)
+	Diag.pcallErrorPath = (OkE == true and Ea == false and Eb == "SIGMA_PROBE")
+
+	local OkE2, Ea2, Eb2 = RealPcall(function()
+		return Patches.Pcall.Target(error, "SIGMA_PROBE")
+	end)
+	Diag.pcallProbeErrorPath = (OkE2 == true and Ea2 == false and Eb2 == "SIGMA_PROBE")
+
+	local OkG, Genv0 = RealPcall(function()
+		return getfenv(0)
+	end)
+	Diag.getfenvChanged = (getfenv ~= Diag.origGetfenv)
+	Diag.getfenv0IsGenv = (OkG == true and Genv0 == Diag.origGenv0)
+
+	local OkD, DEnv = RealPcall(function()
+		local function DeepProbe()
+			return getfenv(1)
+		end
+		return DeepProbe()
+	end)
+	Diag.getfenvDeep = (OkD == true and type(DEnv) == "table")
+
+	Diag.installed = Diag.pcallReturns == 4
+		and Diag.pcallProbeReturns == 4
+		and Diag.pcallErrorPath
+		and Diag.pcallProbeErrorPath
+		and Diag.getfenv0IsGenv
 
 	print(string.format(
-		"[Sigma][Patch] hookPcall=%s hookGetfenv=%s | returns global/probe=%s/%s | genv0 global/probe=%s/%s | stable pcall/getfenv=%s/%s",
+		"[Sigma][Patch] hookPcall=%s hookGetfenv=%s | returns=%s/%s | errPath=%s/%s | genv0=%s deep=%s changed=%s | stable=%s/%s",
 		tostring(PcallOk), tostring(GetfenvOk),
 		tostring(Diag.pcallReturns), tostring(Diag.pcallProbeReturns),
-		tostring(Diag.getfenv0IsGenv), tostring(Diag.getfenv0Probe),
+		tostring(Diag.pcallErrorPath), tostring(Diag.pcallProbeErrorPath),
+		tostring(Diag.getfenv0IsGenv), tostring(Diag.getfenvDeep),
+		tostring(Diag.getfenvChanged),
 		tostring(Diag.pcallStable), tostring(Diag.getfenvStable)
 	))
 
@@ -306,7 +348,13 @@ Diag.pcallErrorPath = (OkE == true and Ea == false and Eb == "SIGMA_PROBE")
 		RealPcall(_hookfunction, Patches.Pcall.Target, PcallOriginal)
 		RealPcall(_hookfunction, Patches.Getfenv.Target, GetfenvOriginal)
 
-		print("[Sigma][Patch] ROLLBACK: семантика сломана, pcall/getfenv восстановлены")
+		local OkA, A, B = RealPcall(function()
+			return pcall(error, "SIGMA_PROBE_AFTER")
+		end)
+		print(string.format(
+			"[Sigma][Patch] ROLLBACK выполнен. После отката pcall(error) -> ok=%s / %s / %s",
+			tostring(OkA), tostring(A), tostring(B)
+		))
 		return
 	end
 

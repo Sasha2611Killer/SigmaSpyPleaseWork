@@ -134,70 +134,82 @@ function Hook:HookMetaMethod(Object: Instance, Call: string, Callback: MetaFunc)
 end
 
 function Hook:PatchFunctions()
-	--// [FIX 2026-11-19] ИДЕМПОТЕНТНОСТЬ (по модулю).
-	--// getgenv() на Velocity не сохраняется между вызовами (каждый вызов
-	--// может отдавать новую таблицу), поэтому счётчик в SigmaDiag не
-	--// сработал. Флаг на самом модуле переживает повторный BeginHooks.
+	--// Идемпотентность по модулю: BeginHooks может сработать дважды.
 	if self._PatchedFunctions then
 		print("[Sigma][Patch] повторный вызов PatchFunctions — пропускаю (хуки уже стоят)")
 		return
 	end
+	self._PatchedFunctions = true
 
-	--// [DIAG] Самодиагностика. Потом можно удалить целиком.
-	local Diag = getgenv().SigmaDiag or {}
-	getgenv().SigmaDiag = Diag
+	--// [FIX 2026-11-19] Настоящие pcall/getfenv — ДО любых хуков.
+	--// Весь код ниже идёт только через них: если исполнитель поставит
+	--// «полуживой» хук, наша собственная логика не упадёт вместе с ним.
+	local RealPcall = pcall
+	local RealGetfenv = getfenv
 
-	Diag.calls = (Diag.calls or 0) + 1
-	Diag.executor = (identifyexecutor and identifyexecutor()) or (getexecutorname and getexecutorname()) or "?"
-	Diag.pcallStable = (pcall == pcall)
-	Diag.getfenvStable = (getfenv == getfenv)
-	Diag.noPatch = (Configuration and Configuration.NoFunctionPatching) or (Config and Config.NoFunctionPatching)
+	--// Спасательный круг для Ui/Process: настоящий pcall виден снаружи.
+	--// Ui:ProcessLogQueue зовёт Hook.RealPcall, если он есть.
+	self.RealPcall = RealPcall
 
-	if Diag.calls > 1 then
-		print(`[Sigma][Patch] повторный вызов #{Diag.calls} — пропускаю (хуки уже стоят)`)
-		return
-	end
-
-	Diag.origPcall = pcall
-	Diag.origGetfenv = getfenv
-	Diag.origGenv0 = getfenv(0)   -- эталон: что getfenv(0) обязан вернуть
-	Diag.hooked = {}
-
-	--// Check if this function is disabled in the configuration
-	if Diag.noPatch then
+	local NoPatch = (Configuration and Configuration.NoFunctionPatching)
+		or (Config and Config.NoFunctionPatching)
+	if NoPatch then
 		print("[Sigma][Patch] SKIPPED: NoFunctionPatching = true")
 		return
 	end
 
-	--// [FIX 2026-11-03] КЛАССИКА. clonefunction(clonefunction) УБРАН —
-	--// недопустим и спамил ошибку в консоль (строка с "clonefunction"
-	--// в логе = риск по списку Adonis). Защищённая копия — только
-	--// hookfunction; цели клонируем обычным clonefunction.
-	local _hookfunction = clonefunction(hookfunction)
+	--// [FIX 2026-11-19] МАРКЕР В НАСТОЯЩЕМ ГЛОБАЛЬНОМ ENV (getfenv(0)).
+	--// getgenv() на Velocity не сохраняется между вызовами, а getfenv(0) — да.
+	--// Без маркера вторая копия (актор / повторный запуск) ставила хук на
+	--// уже захуканный pcall: двойные вызовы и лишние кадры в getfenv.
+	local GlobalEnv = nil
+	do
+		local OkEnv, Env = RealPcall(RealGetfenv, 0)
+		if OkEnv and type(Env) == "table" then
+			GlobalEnv = Env
+		end
+	end
+	if GlobalEnv and rawget(GlobalEnv, "__SigmaFunctionPatched") then
+		print("[Sigma][Patch] pcall уже захукан в этом Lua-state — пропускаю")
+		return
+	end
 
-	--// [FIX 2026-11-19] ГЛАВНОЕ. И pcall, и getfenv ОБЯЗАНЫ возвращать
-	--// unpacked-значения. Раньше возвращался {…} — то есть ОДНА таблица.
-	--// pcall: любая игра получала ok = table (truthy), result = nil
-	--//        → «attempt to index nil» по всему клиенту, спам в консоли,
-	--//        и видимые ошибки, которые pcall должен был проглотить
-	--//        (ReGui SetProperties: AutoSize/ElementStyle).
-	--// getfenv: возвращался {env} вместо env, плюс Level += 2 уезжал
-	--//        на getfenv(0) = глобальное окружение.
 	local Unpack = table.unpack or unpack
 
 	local function SafeUnpack(Packed)
-		return Unpack(Packed, 1, Packed.n or #Packed)
+		local Amount = Packed.n
+		if type(Amount) ~= "number" then
+			Amount = #Packed
+		end
+		return Unpack(Packed, 1, Amount)
 	end
 
-	local Patches = {
-		Pcall = { Target = pcall, Callback = function(OldFunc, Func, ...)
-			local Packed = table.pack(OldFunc(Func, ...))
-			local Success, Error = Packed[1], Packed[2]
+	--// [FIX 2026-11-19] ГЛАВНАЯ СТРАХОВКА.
+	--// Раньше хук звал OldFunc(Func, ...) напрямую. Если clonefunction(pcall)
+	--// на исполнителе не защищает Lua-ошибки (ровно так ведёт себя Velocity),
+	--// ошибка из Func вылетала наружу: «ElementStyle is not a valid member
+	--// of TextButton "Button"» из ReGui убивал очередь логов и клиент.
+	--// Теперь вызов «оригинала» ВСЕГДА обёрнут в настоящий pcall — ошибка
+	--// физически не может покинуть хук.
+	local HooksFired = 0
 
-			--// Только C stack overflow; обычные ошибки не трогаем
-			if Success == false
-				and type(Func) == "function"
-				and type(Error) == "string"
+	local function PcallCallback(OldFunc, Func, ...)
+		HooksFired += 1
+
+		--// Outer[1] — поймал ли ошибку НАШ pcall
+		--// Outer[2] — ok от OldFunc, Outer[3] — первое значение или ошибка
+		local Outer = table.pack(RealPcall(OldFunc, Func, ...))
+
+		if not Outer[1] then
+			--// OldFunc сам выбросил — значит это не pcall. Эмулируем.
+			return false, Outer[2]
+		end
+
+		--// Оригинальная фича: чистим сообщение «C stack overflow» (x196).
+		if Outer[2] == false and type(Outer[3]) == "string" then
+			local Error = Outer[3]
+
+			if type(Func) == "function"
 				and not iscclosure(Func)
 				and string.find(Error, "C stack overflow", 1, true)
 			then
@@ -209,57 +221,44 @@ function Hook:PatchFunctions()
 					if Count == 196 then
 						local Prefix = Caller .. ":" .. Line .. ": "
 
-						--// string.gsub с путём скрипта как паттерном кидает
-						--// «invalid pattern» прямо из хука — заменяем на
-						--// простое сравнение префикса.
 						if string.sub(Error, 1, #Prefix) == Prefix then
-							Packed[2] = Caller .. string.sub(Error, #Prefix + 1)
+							Outer[3] = Caller .. string.sub(Error, #Prefix + 1)
 						end
-
-						--// ConsolePrint внутри хука pcall = реентерабельность
-						task.defer(function()
-							Communication:ConsolePrint(`C stack overflow patched, count was {Count}`)
-						end)
 					end
 				end
 			end
+		end
 
-			return SafeUnpack(Packed)
-		end },
+		return Unpack(Outer, 2, Outer.n)
+	end
 
-		Getfenv = { Target = getfenv, Callback = function(OldFunc, Level, ...)
-			local Target = Level
+	--// [FIX 2026-11-19] getfenv-патч УБРАН.
+	--// Сдвиг уровня (+2) зависит от того, сколько кадров добавляет
+	--// hookfunction конкретного исполнителя; надёжно проверить это нельзя.
+	--// Ошибка на единицу = чужие env у всех библиотек (ReGui, парсер) —
+	--// ровно тот класс поломок, который мы лечим.
 
-			if Target == 0 then
-				--// 0 = глобальное окружение, кадры хука тут не при чём
-				return OldFunc(0, ...)
-			elseif Target == nil then
-				Target = 3          -- 1 по умолчанию + 2 кадра хука
-			elseif type(Target) == "number" then
-				Target += 2
-			end
+	--// Безопасный clonefunction: если копия не получена, установку НЕ
+	--// делаем вообще (иначе Original == Target и хук зовёт сам себя).
+	local _hookfunction
+	do
+		local OkHook, Hooked = RealPcall(clonefunction, hookfunction)
+		_hookfunction = (OkHook and type(Hooked) == "function") and Hooked or hookfunction
+	end
 
-			local ENV = OldFunc(Target, ...)
-
-			if not checkcaller() and ENV == ExeENV then
-				task.defer(function()
-					Communication:ConsolePrint("ENV escape patched")
-				end)
-				return OldFunc(999999, ...)
-			end
-
-			return ENV
-		end }
-	}
-
-	--// [FIX 2026-11-19] Установка по ИМЕНИ, а не по ключу-функции:
-	--// на Velocity hookfunction на C-функциях возвращает мусор вместо
-	--// оригинала, поэтому привязываться к объекту-ключу нельзя.
-	local RealPcall = pcall   -- рабочий pcall для собственных нужд
+	local Hooks = {}
 
 	local function Install(Name, Target, Callback)
-		local Original = clonefunction(Target)
-		local Wrapped = newcclosure(Callback)
+		local OkClone, Original = RealPcall(clonefunction, Target)
+		if not OkClone or type(Original) ~= "function" or Original == Target then
+			print("[Sigma][Patch]  hook:", Name, "-> SKIP: clonefunction не дал копию")
+			return false
+		end
+
+		local OkWrap, Wrapped = RealPcall(newcclosure, Callback)
+		if not OkWrap or type(Wrapped) ~= "function" then
+			Wrapped = Callback
+		end
 
 		local Ok, Err = RealPcall(function()
 			_hookfunction(Target, function(...)
@@ -267,100 +266,137 @@ function Hook:PatchFunctions()
 			end)
 		end)
 
-		Diag.hooked[Name] = Ok and "ok" or ("ERROR: " .. tostring(Err))
-		self.PreviousFunctions[Target] = Original
+		Hooks[Name] = {
+			Target = Target,
+			Original = Original,
+		}
+
+		print("[Sigma][Patch]  hook:", Name, "->", Ok and "ok" or ("ERROR: " .. tostring(Err)))
 
 		return Ok, Original
 	end
 
-	local PcallOk, PcallOriginal = Install("pcall", Patches.Pcall.Target, Patches.Pcall.Callback)
-	local GetfenvOk, GetfenvOriginal = Install("getfenv", Patches.Getfenv.Target, Patches.Getfenv.Callback)
+	local PcallOk, PcallOriginal = Install("pcall", pcall, PcallCallback)
 
-	--// Самопроверка. ВСЁ через RealPcall: если хук встал «полуживым»,
-	--// проверка не должна сама уронить PatchFunctions (иначе спай
-	--// останется без BeginHooks — ровно та поломка, что была раньше).
-	--// global — то, что реально увидит игра (свежее чтение из env).
-	--// probe  — вызов через тот объект, который мы хукали.
-	Diag.pcallOk = PcallOk
-	Diag.getfenvOk = GetfenvOk
-
-	local OkN, Count = RealPcall(function()
-		return select("#", pcall(function() return 1, 2, 3 end))
-	end)
-	Diag.pcallReturns = OkN and Count or "THROW"
-
-	local OkN2, Count2 = RealPcall(function()
-		return select("#", Patches.Pcall.Target(function() return 1, 2, 3 end))
-	end)
-	Diag.pcallProbeReturns = OkN2 and Count2 or "THROW"
-
-	--// [FIX 2026-11-19] ГЛАВНАЯ проверка: pcall ОБЯЗАН ловить ошибку.
-	--// На Velocity hookfunction на C-функциях отдаёт мусор, и хук может
-	--// встать без защиты: значения вернёт, а ошибку пропустит наружу.
-	--// Тогда любая игра и ReGui получают выброшенную ошибку вместо false.
-	local OkE, Ea, Eb = RealPcall(function()
-		return pcall(error, "SIGMA_PROBE")
-	end)
-	Diag.pcallErrorPath = (OkE == true and Ea == false and Eb == "SIGMA_PROBE")
-
-	local OkE2, Ea2, Eb2 = RealPcall(function()
-		return Patches.Pcall.Target(error, "SIGMA_PROBE")
-	end)
-	Diag.pcallProbeErrorPath = (OkE2 == true and Ea2 == false and Eb2 == "SIGMA_PROBE")
-
-	local OkG, Genv0 = RealPcall(function()
-		return getfenv(0)
-	end)
-	Diag.getfenvChanged = (getfenv ~= Diag.origGetfenv)
-	Diag.getfenv0IsGenv = (OkG == true and Genv0 == Diag.origGenv0)
-
-	local OkD, DEnv = RealPcall(function()
-		local function DeepProbe()
-			return getfenv(1)
-		end
-		return DeepProbe()
-	end)
-	Diag.getfenvDeep = (OkD == true and type(DEnv) == "table")
-
-	Diag.installed = Diag.pcallReturns == 4
-		and Diag.pcallProbeReturns == 4
-		and Diag.pcallErrorPath
-		and Diag.pcallProbeErrorPath
-		and Diag.getfenv0IsGenv
-
-	print(string.format(
-		"[Sigma][Patch] hookPcall=%s hookGetfenv=%s | returns=%s/%s | errPath=%s/%s | genv0=%s deep=%s changed=%s | stable=%s/%s",
-		tostring(PcallOk), tostring(GetfenvOk),
-		tostring(Diag.pcallReturns), tostring(Diag.pcallProbeReturns),
-		tostring(Diag.pcallErrorPath), tostring(Diag.pcallProbeErrorPath),
-		tostring(Diag.getfenv0IsGenv), tostring(Diag.getfenvDeep),
-		tostring(Diag.getfenvChanged),
-		tostring(Diag.pcallStable), tostring(Diag.getfenvStable)
-	))
-
-	for Name, State in next, Diag.hooked do
-		print("[Sigma][Patch]  hook:", Name, "->", State)
-	end
-
-	--// Если хук поставился, но семантику сломал — снимаем, чтобы не
-	--// кирпичить pcall/getfenv во всём клиенте.
-	if not Diag.installed then
-		RealPcall(_hookfunction, Patches.Pcall.Target, PcallOriginal)
-		RealPcall(_hookfunction, Patches.Getfenv.Target, GetfenvOriginal)
-
-		local OkA, A, B = RealPcall(function()
-			return pcall(error, "SIGMA_PROBE_AFTER")
-		end)
-		print(string.format(
-			"[Sigma][Patch] ROLLBACK выполнен. После отката pcall(error) -> ok=%s / %s / %s",
-			tostring(OkA), tostring(A), tostring(B)
-		))
+	if not PcallOriginal then
+		print("[Sigma][Patch] pcall не захукан — function patches не применены")
 		return
 	end
 
-	--// Спасательный круг для своих же библиотек (Ui/Process/Communication)
-	getgenv().__SigmaRealPcall = PcallOriginal
-	getgenv().__SigmaRealGetfenv = GetfenvOriginal
+	--// ── Самопроверка ────────────────────────────────────────────────────
+	--// Всё гоняем через RealPcall: диагностика не должна падать сама.
+	local Checks = {}
+
+	local function Report(Name, Ok, Detail)
+		Checks[Name] = Ok and true or false
+
+		local Line = string.format("[Sigma][Patch]  %-18s %s", Name, Ok and "OK" or "FAIL")
+		if Detail ~= nil then
+			Line ..= " (" .. tostring(Detail) .. ")"
+		end
+		print(Line)
+	end
+
+	--// 1. Хук вообще вызывается? (иначе он «тихо не встал»)
+	local HitsBefore = HooksFired
+	RealPcall(function()
+		pcall(function() return 1 end)
+	end)
+	local PcallLive = HooksFired > HitsBefore
+	Report("pcall live", PcallLive, string.format("hits=%d", HooksFired - HitsBefore))
+
+	--// 2. Несколько возвращаемых значений
+	local OkAmount, Amount = RealPcall(function()
+		return select("#", pcall(function() return 1, 2, 3 end))
+	end)
+	Report("pcall returns", OkAmount and Amount == 4, Amount)
+
+	--// 3. Ошибка из Lua-функции (на этом и ломался Velocity)
+	local OkLua, LuaOk, LuaErr = RealPcall(function()
+		return pcall(function() error("SIGMA_LUA_PROBE") end)
+	end)
+	Report("pcall lua error", OkLua and LuaOk == false
+		and type(LuaErr) == "string"
+		and string.find(LuaErr, "SIGMA_LUA_PROBE", 1, true) ~= nil, LuaErr)
+
+	--// 4. Ошибка движка при записи свойства (ElementStyle/AutoSize из ReGui)
+	local OkNative, NativeOk, NativeErr = RealPcall(function()
+		local Probe = Instance.new("Frame")
+		return pcall(function()
+			Probe.ElementStyle = "SIGMA_NATIVE_PROBE"
+		end)
+	end)
+	Report("pcall native error", OkNative and NativeOk == false
+		and type(NativeErr) == "string"
+		and string.find(NativeErr, "ElementStyle", 1, true) ~= nil, NativeErr)
+
+	--// 5. Ошибка из C-функции
+	local OkC, COk, CErr = RealPcall(function()
+		return pcall(error, "SIGMA_C_PROBE")
+	end)
+	Report("pcall C error", OkC and COk == false and CErr == "SIGMA_C_PROBE", CErr)
+
+	--// 6. Вложенный pcall
+	local OkNest, NestA, NestB, NestErr = RealPcall(function()
+		return pcall(function()
+			return pcall(function() error("SIGMA_NESTED_PROBE") end)
+		end)
+	end)
+	Report("pcall nested", OkNest and NestA == true and NestB == false
+		and type(NestErr) == "string"
+		and string.find(NestErr, "SIGMA_NESTED_PROBE", 1, true) ~= nil, NestErr)
+
+	--// 7. Самое важное: исключение не выходит наружу из pcall
+	local Escaped = RealPcall(function()
+		pcall(function() error("SIGMA_ESCAPE_PROBE") end)
+	end)
+	Report("pcall no escape", Escaped == true,
+		Escaped == true and nil or "ошибка вышла наружу")
+
+	local Healthy = Checks["pcall returns"]
+		and Checks["pcall lua error"]
+		and Checks["pcall native error"]
+		and Checks["pcall C error"]
+		and Checks["pcall nested"]
+		and Checks["pcall no escape"]
+
+	--// ── Вердикт ─────────────────────────────────────────────────────────
+	if PcallLive and not Healthy then
+		print("[Sigma][Patch] ROLLBACK: pcall-хук ломает защиту — снимаю")
+
+		RealPcall(_hookfunction, Hooks.pcall.Target, Hooks.pcall.Original)
+
+		--// Вторая страховка: даже если hookfunction не умеет снимать хук
+		--// с C-функции, вернём рабочую ссылку в глобальный env.
+		if GlobalEnv then
+			RealPcall(function()
+				GlobalEnv.pcall = Hooks.pcall.Original
+			end)
+		end
+
+		print("[Sigma][Patch] pcall восстановлен, function patches отключены")
+		return
+	end
+
+	if not PcallLive then
+		print("[Sigma][Patch] pcall-хук не активен (hookfunction не сработал на C-функции)")
+		print("[Sigma][Patch] ничего не изменено — клиент в безопасности")
+		return
+	end
+
+	--// Всё хорошо: помечаем Lua-state, чтобы повторный запуск не хукал хук.
+	if GlobalEnv then
+		RealPcall(function()
+			GlobalEnv.__SigmaFunctionPatched = true
+			GlobalEnv.__SigmaRealPcall = Hooks.pcall.Original
+		end)
+	end
+
+	print(string.format(
+		"[Sigma][Patch] function patches активны | executor=%s | live=%s",
+		tostring(identifyexecutor and identifyexecutor() or (getexecutorname and getexecutorname()) or "?"),
+		tostring(PcallLive)
+	))
 end
 
 function Hook:GetOriginalFunc(Func)

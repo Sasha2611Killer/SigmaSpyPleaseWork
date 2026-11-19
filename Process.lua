@@ -655,7 +655,6 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
 	local Method = Data.Method
     local TransferType = Data.TransferType
     local IsReceive = Data.IsReceive
-	print("[DBG] ProcessRemote:", Method, "Remote:", typeof(Remote), "IsActor:", Data.IsActor, "ExtraData:", self.ExtraData ~= nil)
 
 	if TransferType and not self:RemoteAllowed(Remote, TransferType, Method) then return end
 

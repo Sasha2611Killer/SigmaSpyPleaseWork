@@ -661,17 +661,23 @@ end
 function Hook:RunOnActors(Code: string, ChannelId: number)
 	if not getactors or not run_on_actor then return end
 
-	--// [FIX 2026-11-19] Реестр захуканных акторов + watchdog.
-	--// Инстанс Actor может существовать ДО своего LuaState (типично для
-	--// актора в PlayerScripts): getactors() его видит, run_on_actor падает,
-	--// DescendantAdded не сработает (актор создан раньше), а
-	--// on_actor_state_created на Velocity нет. Старые 10 попыток по 0.25с
-	--// (2.5с) такой актор не покрывали — он оставался без хуков навсегда.
-	self._HookedActors = self._HookedActors or setmetatable({}, { __mode = "k" })
-	self._ActorPending = self._ActorPending or setmetatable({}, { __mode = "k" })
+	--// [FIX 2026-11-19] strong-реестр. Weak-ключи (__mode="k") теряли
+	--// Instance-ключ: актор держится только движком, Lua-ссылки нет,
+	--// GC уносил запись → watchdog каждые 3 сек инжектил бандл заново
+	--// (в акторе накапливалось 6+ копий модулей, простыня "hooked:").
+	--// Instance как ключ в обычной таблице — это одна ссылка, утечки нет:
+	--// после Destroy ключ остаётся, но акторов за сессию единицы.
+	self._HookedActors = self._HookedActors or {}
+	self._ActorPending = self._ActorPending or {}
+
+	local function GetKey(Actor)
+		--// GetFullName надёжнее ссылки: переживает клонирование/пересоздание
+		local Ok, Name = pcall(function() return Actor:GetFullName() end)
+		return Ok and Name or Actor
+	end
 
 	local function IsHooked(Actor)
-		return self._HookedActors[Actor] == true
+		return self._HookedActors[GetKey(Actor)] == true
 	end
 
 	local function TryHook(Actor)
@@ -679,7 +685,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 
 		local Ok = pcall(run_on_actor, Actor, Code, ChannelId)
 		if Ok then
-			self._HookedActors[Actor] = true
+			self._HookedActors[GetKey(Actor)] = true
 			print("[Sigma][Actor] hooked:", tostring(Actor))
 		end
 
@@ -687,8 +693,11 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 	end
 
 	local function HookActor(Actor)
-		if not Actor or IsHooked(Actor) or self._ActorPending[Actor] then return end
-		self._ActorPending[Actor] = true
+		if not Actor then return end
+
+		local Key = GetKey(Actor)
+		if self._HookedActors[Key] or self._ActorPending[Key] then return end
+		self._ActorPending[Key] = true
 
 		task.spawn(function()
 			local Attempts = 0
@@ -699,13 +708,12 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 				task.wait(0.25)
 			until Attempts >= 8
 
-			self._ActorPending[Actor] = nil
+			self._ActorPending[Key] = nil
 		end)
 	end
 
 	--// Современная библиотека: getactorstates может возвращать НЕ Actor-инстансы,
 	--// а состояния — треды (run_on_thread) или LuaStateProxy (:Execute).
-	--// Классический getactors() такие акторы не видит.
 	local SkipClassic = false
 	if typeof(getactorstates) == "function" then
 		local Ok, States = pcall(getactorstates)
@@ -715,7 +723,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 				for _, State in next, States do
 					pcall(run_on_thread, State, Code, ChannelId)
 				end
-				SkipClassic = true -- состояния захуканы — getactors-проход не нужен
+				SkipClassic = true
 			elseif (type(First) == "userdata" or type(First) == "table") and First.IsActorState then
 				local HookedAny = false
 				for _, Proxy in next, States do
@@ -732,7 +740,6 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
-	--// Текущие + удалённые (неинициализированные) акторы — как в Cobalt
 	if not SkipClassic then
 		for _, Category in {getactors(), typeof(getdeletedactors) == "function" and getdeletedactors() or {}} do
 			if Category then
@@ -743,8 +750,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end
 	end
 
-	--// Акторы, созданные ПОЗЖЕ: нативное событие → fallback DescendantAdded.
-	--// Сигнал может отдавать и состояние (тред), а не Actor.
+	--// Акторы, созданные ПОЗЖЕ
 	local StateCreated = typeof(on_actor_state_created) == "RBXScriptSignal" and on_actor_state_created or nil
 	if StateCreated then
 		StateCreated:Connect(function(State)
@@ -762,8 +768,7 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		end)
 	end
 
-	--// [FIX 2026-11-19] Watchdog: раз в 3 секунды добираем акторов, которых
-	--// ещё нет в реестре. Именно это закрывает «инстанс есть, VM позже».
+	--// Watchdog: инстанс актора может появиться раньше своего LuaState
 	if SkipClassic or self._ActorWatchdog then return end
 	self._ActorWatchdog = true
 

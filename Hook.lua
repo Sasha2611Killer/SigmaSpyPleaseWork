@@ -661,19 +661,45 @@ end
 function Hook:RunOnActors(Code: string, ChannelId: number)
 	if not getactors or not run_on_actor then return end
 
-	--// Cobalt-style ретрай: run_on_actor может падать на неинициализированных
-	--// акторах (LuaStateProxy) — повторяем до 10 раз с паузой
+	--// [FIX 2026-11-19] Реестр захуканных акторов + watchdog.
+	--// Инстанс Actor может существовать ДО своего LuaState (типично для
+	--// актора в PlayerScripts): getactors() его видит, run_on_actor падает,
+	--// DescendantAdded не сработает (актор создан раньше), а
+	--// on_actor_state_created на Velocity нет. Старые 10 попыток по 0.25с
+	--// (2.5с) такой актор не покрывали — он оставался без хуков навсегда.
+	self._HookedActors = self._HookedActors or setmetatable({}, { __mode = "k" })
+	self._ActorPending = self._ActorPending or setmetatable({}, { __mode = "k" })
+
+	local function IsHooked(Actor)
+		return self._HookedActors[Actor] == true
+	end
+
+	local function TryHook(Actor)
+		if not Actor or IsHooked(Actor) then return true end
+
+		local Ok = pcall(run_on_actor, Actor, Code, ChannelId)
+		if Ok then
+			self._HookedActors[Actor] = true
+			print("[Sigma][Actor] hooked:", tostring(Actor))
+		end
+
+		return Ok
+	end
+
 	local function HookActor(Actor)
+		if not Actor or IsHooked(Actor) or self._ActorPending[Actor] then return end
+		self._ActorPending[Actor] = true
+
 		task.spawn(function()
-			local Hooked = false
 			local Attempts = 0
+
 			repeat
-				Hooked = pcall(run_on_actor, Actor, Code, ChannelId)
 				Attempts += 1
-				if not Hooked then
-					task.wait(0.25)
-				end
-			until Hooked or Attempts > 10
+				if TryHook(Actor) then break end
+				task.wait(0.25)
+			until Attempts >= 8
+
+			self._ActorPending[Actor] = nil
 		end)
 	end
 
@@ -686,13 +712,13 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 		if Ok and type(States) == "table" then
 			local First = next(States)
 			if type(First) == "thread" and typeof(run_on_thread) == "function" then
-				for _, State in States do
+				for _, State in next, States do
 					pcall(run_on_thread, State, Code, ChannelId)
 				end
 				SkipClassic = true -- состояния захуканы — getactors-проход не нужен
 			elseif (type(First) == "userdata" or type(First) == "table") and First.IsActorState then
 				local HookedAny = false
-				for _, Proxy in States do
+				for _, Proxy in next, States do
 					if not Proxy.IsActorState then continue end
 					local OkH = pcall(function()
 						return Proxy:Execute(Code, ChannelId, Proxy:GetActors()[1])
@@ -718,10 +744,16 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 	end
 
 	--// Акторы, созданные ПОЗЖЕ: нативное событие → fallback DescendantAdded.
-	--// В старой версии такие акторы вообще не хукались.
+	--// Сигнал может отдавать и состояние (тред), а не Actor.
 	local StateCreated = typeof(on_actor_state_created) == "RBXScriptSignal" and on_actor_state_created or nil
 	if StateCreated then
-		StateCreated:Connect(HookActor)
+		StateCreated:Connect(function(State)
+			if typeof(State) == "Instance" and State:IsA("Actor") then
+				HookActor(State)
+			elseif type(State) == "thread" and typeof(run_on_thread) == "function" then
+				pcall(run_on_thread, State, Code, ChannelId)
+			end
+		end)
 	else
 		game.DescendantAdded:Connect(function(Instance)
 			if typeof(Instance) == "Instance" and Instance:IsA("Actor") then
@@ -729,6 +761,26 @@ function Hook:RunOnActors(Code: string, ChannelId: number)
 			end
 		end)
 	end
+
+	--// [FIX 2026-11-19] Watchdog: раз в 3 секунды добираем акторов, которых
+	--// ещё нет в реестре. Именно это закрывает «инстанс есть, VM позже».
+	if SkipClassic or self._ActorWatchdog then return end
+	self._ActorWatchdog = true
+
+	task.spawn(function()
+		while true do
+			task.wait(3)
+
+			local Ok, List = pcall(getactors)
+			if Ok and type(List) == "table" then
+				for _, Actor in next, List do
+					if not IsHooked(Actor) then
+						HookActor(Actor)
+					end
+				end
+			end
+		end
+	end)
 end
 
 local function ProcessRemote(OriginalFunc, MetaMethod: string, self, Method: string, ...)

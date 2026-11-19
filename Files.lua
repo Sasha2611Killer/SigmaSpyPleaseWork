@@ -115,7 +115,7 @@ function Files:GetFile(Path: string, CustomAsset: boolean?): string?
 end
 
 function Files:GetTemplate(Name: string): string
-    return self:GetFile(`templates/{Name}.lua`)
+    return self:GetFile(`{Name}.lua`)
 end
 
 function Files:FileCheck(Path: string, Callback)

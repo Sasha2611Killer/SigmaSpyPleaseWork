@@ -145,6 +145,7 @@ function Hook:PatchFunctions()
 	local RealPcall = pcall
 	local RealGetfenv = getfenv
 	self.RealPcall = RealPcall
+	self.RealGetfenv = RealGetfenv
 
 	local NoPatch = (Configuration and Configuration.NoFunctionPatching)
 		or (Config and Config.NoFunctionPatching)
@@ -162,7 +163,7 @@ function Hook:PatchFunctions()
 	end
 
 	if GlobalEnv and rawget(GlobalEnv, "__SigmaFunctionPatched") then
-		print("[Sigma][Patch] pcall уже обёрнут в этом Lua-state — пропускаю")
+		print("[Sigma][Patch] function patches уже стоят в этом Lua-state — пропускаю")
 		return
 	end
 
@@ -176,6 +177,7 @@ function Hook:PatchFunctions()
 	--// сам себя → C stack overflow → клиент кирпичится до реджойна.
 	--// Поэтому builtin pcall остаётся нетронутым, а в глобальный env
 	--// кладётся обёртка. Откат = одно присваивание.
+	--// getfenv — по той же причине: только обёртка в env, без hookfunction.
 
 	local function PatchMessage(Results, Func)
 		local Error = Results[2]
@@ -242,20 +244,152 @@ function Hook:PatchFunctions()
 		end
 	end
 
-	local Previous = {}
-	for _, Env in next, Targets do
-		local Old = Env.pcall
+	--// ── getfenv: ENV-escape защита (обычная Lua-обёртка) ────────────────
+	--// [FIX 2026-11-19] БЕЗ hookfunction — как и pcall.
+	--// Probe на Velocity подтвердил: обёртка со сдвигом +1 отдаёт ровно
+	--// тот же env, что и настоящий getfenv, для уровней 1/2/0 и функции.
+	--// Смысл: чужой скрипт не должен получить окружение исполнителя —
+	--// там hookfunction, getgc, getrawmetatable и прочие маркеры.
+	local GetfenvCalls = 0
+	local EnvBlocked = 0
+	local CheckCaller = (typeof(checkcaller) == "function") and checkcaller or nil
 
-		--// env с защищённым __newindex не должен ронять установку
-		local OkSet = RealPcall(function()
-			Env.pcall = Wrapped
-		end)
-		if OkSet then
-			Previous[Env] = Old
+	--// КЛЮЧЕВОЕ: checkcaller должен возвращать true в НАШЕМ же потоке.
+	--// Если исполнитель так не умеет — блокировка выключена целиком
+	--// (fail-open), иначе мы заблокировали бы собственный env.
+	local CanCheckCaller = false
+	if CheckCaller then
+		local OkCaller, Caller = RealPcall(CheckCaller)
+		CanCheckCaller = OkCaller and Caller == true
+
+		--// Второй замер — из loadstring-чанка (так грузятся ReGui/Ui).
+		--// Если там checkcaller уже не наш, блокировать нельзя:
+		--// мы бы роняли свои же библиотеки.
+		if CanCheckCaller then
+			local OkLoad, Chunk = RealPcall(loadstring,
+				"return (typeof(checkcaller) == 'function') and checkcaller() == true")
+
+			if OkLoad and type(Chunk) == "function" then
+				local OkRun, IsOurs = RealPcall(Chunk)
+				CanCheckCaller = OkRun and IsOurs == true
+			else
+				CanCheckCaller = false
+			end
 		end
 	end
 
-	print("[Sigma][Patch]  bind: pcall -> wrapped (builtin не тронут)")
+	local function IsExecutorEnv(Value)
+		if type(Value) ~= "table" then return false end
+
+		for _, Env in next, Targets do
+			if Env == Value then return true end
+		end
+
+		return false
+	end
+
+	local function GetfenvWrapper(Target)
+		GetfenvCalls += 1
+
+		--// getfenv() без аргумента = уровень 1
+		if Target == nil then Target = 1 end
+
+		--// 0 = глобальное окружение; кадры обёртки тут не при чём
+		if Target == 0 then
+			return RealGetfenv(0)
+		end
+
+		local ENV
+		if type(Target) == "number" then
+			--// Заведомо невозможные уровни отбиваем сами: иначе настоящий
+			--// getfenv бросит ошибку со ссылкой на наш чанк (утечка).
+			if Target < 0 or Target > 250 then
+				error("bad argument #1 to 'getfenv' (invalid level)", 2)
+			end
+
+			--// +1: один кадр стека — сама обёртка
+			ENV = RealGetfenv(Target + 1)
+		elseif type(Target) == "function" then
+			--// функция — сдвиг не нужен
+			ENV = RealGetfenv(Target)
+		else
+			error("bad argument #1 to 'getfenv' (number expected, got "
+				.. type(Target) .. ")", 2)
+		end
+
+		if not IsExecutorEnv(ENV) then
+			return ENV
+		end
+
+		--// Своим отдаём, чужим — нет.
+		local IsOurs = true
+		if CanCheckCaller then
+			local OkCaller, Caller = RealPcall(CheckCaller)
+			IsOurs = OkCaller and Caller == true
+		end
+
+		if not IsOurs then
+			--// Запасной признак: наш колбэк, вызванный игровым потоком,
+			--// живёт в окружении исполнителя — его не блокируем.
+			--// level 2 = тот, кто позвал обёртку (level 1 — она сама).
+			IsOurs = IsExecutorEnv(RealGetfenv(2))
+		end
+
+		if IsOurs then
+			return ENV
+		end
+
+		EnvBlocked += 1
+
+		--// Нативный текст, но без утечки имени нашего чанка:
+		--// level 2 = тот, кто звал getfenv.
+		error("bad argument #1 to 'getfenv' (invalid level)", 2)
+	end
+
+	local Previous = {}
+
+	--// env с защищённым __newindex не должен ронять установку,
+	--// поэтому каждое присваивание — отдельный pcall.
+	for _, Env in next, Targets do
+		local Old = {}
+
+		RealPcall(function()
+			Old.pcall = Env.pcall
+			Env.pcall = Wrapped
+		end)
+
+		RealPcall(function()
+			Old.getfenv = Env.getfenv
+			Env.getfenv = GetfenvWrapper
+		end)
+
+		Previous[Env] = Old
+	end
+
+	local function Restore(Env, Name)
+		local Old = Previous[Env]
+		if not Old then return end
+
+		local Value = Old[Name]
+		if type(Value) ~= "function" then return end
+
+		RealPcall(function()
+			Env[Name] = Value
+		end)
+	end
+
+	--// Внутренние модули берут настоящие функции через
+	--// Hook:GetOriginalFunc(getfenv). Регистрируем обёртки как "хуки",
+	--// иначе Process:FindCallingClosures на игровом потоке получил бы
+	--// ошибку от env-защиты и зря поднял бы identity потока.
+	self.PreviousFunctions[Wrapped] = RealPcall
+	self.PreviousFunctions[GetfenvWrapper] = RealGetfenv
+
+	print("[Sigma][Patch]  bind: pcall + getfenv -> wrappers (builtin не тронут)")
+
+	if not CanCheckCaller then
+		print("[Sigma][Patch]  checkcaller недоступен — env-защита в режиме fail-open")
+	end
 
 	--// ── Самопроверка ────────────────────────────────────────────────────
 	local Checks = {}
@@ -333,8 +467,11 @@ function Hook:PatchFunctions()
 	local Escaped = RealPcall(function()
 		pcall(function() error("SIGMA_ESCAPE_PROBE") end)
 	end)
-	Report("pcall no escape", Escaped == true,
-		Escaped == true and nil or "ошибка вышла наружу")
+	local EscapeDetail = nil
+	if Escaped ~= true then
+		EscapeDetail = "ошибка вышла наружу"
+	end
+	Report("pcall no escape", Escaped == true, EscapeDetail)
 
 	--// 8. Видна ли обёртка НОВЫМ чанкам — так грузится ReGui
 	--// (loadstring получает глобальный env, а не env модуля)
@@ -356,6 +493,85 @@ function Hook:PatchFunctions()
 		and type(ChunkErr) == "string"
 		and string.find(ChunkErr, "SIGMA_CHUNK_PROBE", 1, true) ~= nil, ChunkErr)
 
+	--// ── getfenv: проверки ───────────────────────────────────────────────
+	--// Ожидание: env этого модуля, полученный без обёртки.
+	local ExpectedEnv = RealGetfenv(1)
+
+	local GfHits = GetfenvCalls
+	local OkG1, Gf1 = RealPcall(function()
+		return getfenv(1)
+	end)
+	Report("getfenv live", GetfenvCalls > GfHits,
+		string.format("hits=%d", GetfenvCalls - GfHits))
+
+	local Detail1 = nil
+	if not OkG1 then
+		Detail1 = Gf1
+	elseif Gf1 ~= ExpectedEnv then
+		Detail1 = "чужой env"
+	end
+	Report("getfenv(1)", OkG1 and Gf1 == ExpectedEnv, Detail1)
+
+	--// Уровень 2: 1 = сама функция, 2 = тот, кто её вызвал
+	local OkG2, Gf2 = RealPcall(function()
+		local function Inner()
+			return getfenv(2)
+		end
+		return Inner()
+	end)
+	local Detail2 = nil
+	if not OkG2 then
+		Detail2 = Gf2
+	elseif Gf2 ~= ExpectedEnv then
+		Detail2 = "сдвиг +1 неверен"
+	end
+	Report("getfenv(2)", OkG2 and Gf2 == ExpectedEnv, Detail2)
+
+	--// 0 = глобальное окружение, без сдвига
+	local OkG0, Gf0 = RealPcall(function()
+		return getfenv(0)
+	end)
+	local Detail0 = nil
+	if not OkG0 then
+		Detail0 = Gf0
+	elseif Gf0 ~= GlobalEnv then
+		Detail0 = "0 уехал на другой env"
+	end
+	Report("getfenv(0)", OkG0 and Gf0 == GlobalEnv, Detail0)
+
+	--// getfenv(function) — без сдвига, env свой
+	local Marker = {}
+	local ProbeFunc = function() end
+	local OkSetFenv = RealPcall(setfenv, ProbeFunc, Marker)
+	local OkGf, GfFunc = RealPcall(getfenv, ProbeFunc)
+
+	local DetailFunc = nil
+	if not OkSetFenv then
+		DetailFunc = "setfenv недоступен"
+	elseif not OkGf then
+		DetailFunc = GfFunc
+	elseif GfFunc ~= Marker then
+		DetailFunc = "env функции не совпал"
+	end
+	Report("getfenv(func)", OkSetFenv and OkGf and GfFunc == Marker, DetailFunc)
+
+	--// ReGui/Ui грузятся через loadstring и зовут getfenv() —
+	--// обёртка не должна блокировать чанки самого исполнителя.
+	local OkGChunk, GChunk = RealPcall(loadstring, "return getfenv()")
+	local GChunkOk, GChunkDetail = false, nil
+
+	if OkGChunk and type(GChunk) == "function" then
+		local OkRun, Env = RealPcall(GChunk)
+		GChunkOk = OkRun and type(Env) == "table"
+		if not GChunkOk then
+			GChunkDetail = Env
+		end
+	else
+		GChunkDetail = GChunk
+	end
+
+	Report("getfenv in chunk", GChunkOk, GChunkDetail)
+
 	local Healthy = Checks["pcall direct"]
 		and Checks["pcall returns"]
 		and Checks["pcall lua error"]
@@ -373,10 +589,9 @@ function Hook:PatchFunctions()
 
 		print("[Sigma][Patch] ROLLBACK: обёртка pcall некорректна — возвращаю ссылки")
 
-		for Env, Old in next, Previous do
-			RealPcall(function()
-				Env.pcall = Old
-			end)
+		for Env in next, Previous do
+			Restore(Env, "pcall")
+			Restore(Env, "getfenv")
 		end
 
 		print("[Sigma][Patch] pcall восстановлен, function patches отключены")
@@ -387,14 +602,31 @@ function Hook:PatchFunctions()
 		print("[Sigma][Patch] обёртка не видна в env модуля — function patches не применены")
 
 		--// Ссылки, которые успели подменить, возвращаем назад.
-		for Env, Old in next, Previous do
-			RealPcall(function()
-				Env.pcall = Old
-			end)
+		for Env in next, Previous do
+			Restore(Env, "pcall")
+			Restore(Env, "getfenv")
 		end
 
 		print("[Sigma][Patch] builtin pcall не тронут — клиент в безопасности")
 		return
+	end
+
+	--// getfenv проверяется отдельно: если он не сошёлся, снимаем ТОЛЬКО его.
+	local GfHealthy = Checks["getfenv live"]
+		and Checks["getfenv(1)"]
+		and Checks["getfenv(2)"]
+		and Checks["getfenv(0)"]
+		and Checks["getfenv(func)"]
+		and Checks["getfenv in chunk"]
+
+	if not GfHealthy then
+		print("[Sigma][Patch] ROLLBACK: getfenv-обёртка некорректна — возвращаю ссылку")
+
+		for Env in next, Previous do
+			Restore(Env, "getfenv")
+		end
+
+		print("[Sigma][Patch] getfenv восстановлен, ENV-защита выключена (pcall-патч остался)")
 	end
 
 	if GlobalEnv then
@@ -404,7 +636,8 @@ function Hook:PatchFunctions()
 	end
 
 	print(string.format(
-		"[Sigma][Patch] function patches активны | executor=%s",
+		"[Sigma][Patch] function patches активны | env-защита=%s | executor=%s",
+		GfHealthy and "вкл" or "выкл",
 		tostring(identifyexecutor and identifyexecutor() or (getexecutorname and getexecutorname()) or "?")
 	))
 end
@@ -419,7 +652,7 @@ function Hook:IsSpyConnectionFunction(Function): boolean
 	if not Function then return false end
 	if Process.LogConnectionFunctions[Function] then return true end
 
-	local Success, Env = pcall(getfenv, Function)
+	local Success, Env = pcall(self.RealGetfenv or getfenv, Function)
 	return Success
 		and typeof(Env) == "table"
 		and rawget(Env, "__SigmaSpyLogger") == SpyVerificationToken
@@ -660,7 +893,7 @@ function Hook:HookClientInvoke(Remote, Method, Callback)
 	--// вызов (checkcaller() == false), а не executor.
 	local OriginalEnv = {}
 	pcall(function()
-		OriginalEnv = getfenv(Function)
+		OriginalEnv = (self.RealGetfenv or getfenv)(Function)
 	end)
 	local OriginalScript = rawget(OriginalEnv, "script")
 	local Trampoline = trampoline_call or (typeof(syn) == "table" and syn.trampoline_call) or nil
@@ -714,7 +947,7 @@ function Hook:ConnectClientRecive(Remote)
 
 	--// Env-токен (Cobalt-style): помечаем функцию как свою — токен живёт
 	--// в env и переживает clonefunction, в отличие от реестра по ссылке.
-	local OriginalEnv = getfenv(Callback)
+	local OriginalEnv = (self.RealGetfenv or getfenv)(Callback)
 	setfenv(Callback, setmetatable({
 		["__SigmaSpyLogger"] = SpyVerificationToken,
 	}, {

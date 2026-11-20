@@ -1596,6 +1596,7 @@ function Ui:QueueLog(Data)
 		end
 		return
 	end
+	print("[DBG] QueueLog:", Data.Method, "IsActor:", Data.IsActor, "Remote:", typeof(Data.Remote))
 
 	--// Guard: логи из actor-VM могут приходить с Remote == nil
 	--// (инстанс не пережил пересечение границы Lua-state через канал).

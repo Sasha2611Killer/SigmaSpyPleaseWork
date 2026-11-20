@@ -634,24 +634,24 @@ function Process:PromptDiscordInvite(InviteCode: string)
 end
 
 local ProcessCallback = newcclosure(function(Data: RemoteData, Remote, ...): table?
-    local OriginalFunc = Data.OriginalFunc
-    local Id = Data.Id
-    local Method = Data.Method
-print("[DBG] ProcessCallback:", Method, "OriginalFunc:", typeof(OriginalFunc))
-										
+	local OriginalFunc = Data.OriginalFunc
+	local Id = Data.Id
+	local Method = Data.Method
 
-    local RemoteData = Process:GetRemoteData(Id)
-    if RemoteData.Blocked then return {} end
+	if typeof(OriginalFunc) ~= "function" then
+		return {}
+	end
 
-    local Spoof = Process:GetRemoteSpoof(Remote, Method, OriginalFunc, ...)
-    if Spoof then return Spoof end
+	local RemoteData = Process:GetRemoteData(Id)
+	if RemoteData.Blocked then return {} end
 
-    if not OriginalFunc then return end
+	local Spoof = Process:GetRemoteSpoof(Remote, Method, OriginalFunc, ...)
+	if Spoof then return Spoof end
 
-    return {
-        OriginalFunc(Remote, ...)
-		
-    }
+	--// [FIX] table.pack сохраняет n (количество), иначе nil в середине
+	--// съедал бы хвост возвратов
+	local Results = table.pack(OriginalFunc(Remote, ...))
+	return Results
 end)
 
 function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
@@ -744,7 +744,7 @@ print("[DBG] ProcessRemote:", Data.Method, "MetaMethod:", Data.MetaMethod, "IsAc
     })
 
     local ReturnValues = ProcessCallback(Data, Remote, ...)
-    Data.ReturnValues = ReturnValues
+	Data.ReturnValues = ReturnValues
 
     Communication:QueueLog(Data)
 

@@ -850,9 +850,13 @@ function Hook:BeginHooks()
 		OriginalNameCall = OthOriginal
 	else
 		OriginalNameCall = self:ReplaceMetaMethod(game, "__namecall", function(self, ...)
-			local Method = getnamecallmethod()
-			return ProcessRemote(OriginalNameCall, "__namecall", self, Method, ...)
-		end)
+	local Method = getnamecallmethod()
+	local Ok, ReturnValues = pcall(ProcessRemote, OriginalNameCall, "__namecall", self, Method, ...)
+	if Ok and ReturnValues then
+		return Process:Unpack(ReturnValues)
+	end
+	return OriginalNameCall(self, ...)
+end)
 	end
 
 	Merge(self, {

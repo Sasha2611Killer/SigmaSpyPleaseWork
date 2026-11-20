@@ -1596,14 +1596,23 @@ function Ui:QueueLog(Data)
 		end
 		return
 	end
+			
+	local HasValidRemote = typeof(Data.Remote) == "Instance"
+	if not HasValidRemote and not Data.Id then
+		return
+	end
 	print("[DBG] QueueLog:", Data.Method, "IsActor:", Data.IsActor, "Remote:", typeof(Data.Remote))
 
 	--// Guard: логи из actor-VM могут приходить с Remote == nil
-	--// (инстанс не пережил пересечение границы Lua-state через канал).
-	--// attempt to index nil with 'Parent' в CreateLog лечится здесь.
-	if typeof(Data.Remote) ~= "Instance" and not Data.Id then
-		return
-	end
+--// (инстанс не пережил пересечение границы Lua-state через канал).
+--// Пускаем только если есть Id — CreateLog подставит заглушку.
+if typeof(Data.Remote) ~= "Instance" then
+    if not Data.Id then return end
+    --// [FIX] Пропускаем проверки, требующие валидный Remote
+    continue
+end
+
+			
 
 	local Remote = Data.Remote
 	local Id = Data.Id
@@ -1616,9 +1625,12 @@ function Ui:QueueLog(Data)
 	if Data.IsReceive and not Flags:GetFlagValue("LogRecives") then return end
 	if Data.IsExploit and not Flags:GetFlagValue("LogExploit") then return end
 
-	if Flags:GetFlagValue("IgnoreNil") and Hook:Index(Remote, "Parent") == nil then
-		return
+	if HasValidRemote then
+		if Flags:GetFlagValue("IgnoreNil") and Hook:Index(Data.Remote, "Parent") == nil then
+			return
+		end
 	end
+	
 
 	if Process:GetRemoteData(Id).Excluded then return end
 
@@ -1731,15 +1743,17 @@ end
 function Ui:CreateLog(Data: Log)
 	--// Guard: дропаем логи без валидного remote (см. QueueLog)
 	if typeof(Data.Remote) ~= "Instance" then
+		local Id = Data.Id or "unknown"
 		Data.Remote = setmetatable({
-			Name = "[Actor Remote]",
-			ClassName = "RemoteFunction",
+			Name = `[Actor ${Data.Method or "Remote"}]`,
+			ClassName = "Instance",
 		}, {
-			__tostring = function() return "[Actor Remote]" end,
+			__tostring = function() return `[Actor ${Id}]` end,
 			__index = function(_, key)
-				if key == "GetDebugId" then return function() return Data.Id end end
+				if key == "GetDebugId" then return function() return Id end end
+				if key == "Parent" then return nil end
 				return nil
-			end
+			end,
 		})
 	end
 

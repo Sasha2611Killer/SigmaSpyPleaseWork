@@ -1586,6 +1586,25 @@ function Ui:ClearLogs()
 	table.clear(Logs)
 end
 
+--// [ACTOR FIX] actor-лог может прийти без Instance (граница Lua-state).
+--// Communication кладёт RemotePath — восстанавливаем remote по полному пути.
+function Ui:ResolveRemotePath(Path: string?): Instance?
+	if type(Path) ~= "string" or Path == "" then return end
+
+	local Node = game
+	for Part in Path:gmatch("[^%.]+") do
+		local Ok, Child = pcall(function()
+			return Node:FindFirstChild(Part)
+		end)
+		if not Ok or not Child then return end
+		Node = Child
+	end
+
+	if Node ~= game and typeof(Node) == "Instance" then
+		return Node
+	end
+end
+
 function Ui:QueueLog(Data)
 	--// [FIX] Communication теперь шлёт БАТЧ (Cobalt-style), а не одиночный
 	--// лог. Раньше батч прилетал в Ui:QueueLog как один Data, guard ниже
@@ -1599,8 +1618,22 @@ function Ui:QueueLog(Data)
 
 	--// Guard: логи из actor-VM могут приходить с Remote == nil
 	--// (инстанс не пережил пересечение границы Lua-state через канал).
-	--// attempt to index nil with 'Parent' в CreateLog лечится здесь.
+	--// Пробуем восстановить remote по пути; иначе CreateLog упадёт на Remote.Parent.
 	if typeof(Data.Remote) ~= "Instance" then
+		Data.Remote = self:ResolveRemotePath(Data.RemotePath)
+	end
+	if typeof(Data.Remote) ~= "Instance" then
+		--// один раз на путь: чтобы было видно, если remote реально не найден
+		local Unresolved = self.UnresolvedRemotes
+		if not Unresolved then
+			Unresolved = {}
+			self.UnresolvedRemotes = Unresolved
+		end
+		local Key = Data.RemotePath or tostring(Data.Id)
+		if not Unresolved[Key] then
+			Unresolved[Key] = true
+			self:ConsoleLog("Actor log dropped: remote not found ->", Key)
+		end
 		return
 	end
 

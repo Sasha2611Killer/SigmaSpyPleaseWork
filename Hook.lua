@@ -763,7 +763,26 @@ function Hook:HookRemoteIndexes()
 	local RemoteClassData = Process.RemoteClassData
 	for ClassName, Data in RemoteClassData do
 		local FuncName = Data.Send[1]
-		self:HookRemoteTypeIndex(ClassName, FuncName)
+		--// [FIX] Для RemoteFunction пробуем оба варианта:
+		--// InvokeServer через __index может не дать функцию в некоторых VM
+		local Remote = Instance.new(ClassName)
+		local Func = Remote[FuncName]
+		
+		--// Если __index не дал функцию, пробуем через __namecall напрямую
+		if typeof(Func) ~= "function" and Data.IsRemoteFunction then
+			--// Для RemoteFunction хукаем через __namecall отдельно
+			local OriginalFunc
+			OriginalFunc = self:HookFunction(getrawmetatable(game).__namecall, function(self, ...)
+				local Method = getnamecallmethod()
+				if Method ~= FuncName then
+					return OriginalFunc(self, ...)
+				end
+				if not Process:RemoteAllowed(self, "Send", FuncName) then return end
+				return ProcessRemote(OriginalFunc, "__namecall", self, FuncName, ...)
+			end)
+		else
+			self:HookRemoteTypeIndex(ClassName, FuncName)
+		end
 	end
 end
 

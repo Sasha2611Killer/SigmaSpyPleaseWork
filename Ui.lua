@@ -1601,7 +1601,7 @@ function Ui:QueueLog(Data)
 	--// Guard: логи из actor-VM могут приходить с Remote == nil
 	--// (инстанс не пережил пересечение границы Lua-state через канал).
 	--// attempt to index nil with 'Parent' в CreateLog лечится здесь.
-	if typeof(Data.Remote) ~= "Instance" then
+	if typeof(Data.Remote) ~= "Instance" and not Data.Id then
 		return
 	end
 
@@ -1731,7 +1731,16 @@ end
 function Ui:CreateLog(Data: Log)
 	--// Guard: дропаем логи без валидного remote (см. QueueLog)
 	if typeof(Data.Remote) ~= "Instance" then
-		return
+		Data.Remote = setmetatable({
+			Name = "[Actor Remote]",
+			ClassName = "RemoteFunction",
+		}, {
+			__tostring = function() return "[Actor Remote]" end,
+			__index = function(_, key)
+				if key == "GetDebugId" then return function() return Data.Id end end
+				return nil
+			end
+		})
 	end
 
 	--// Unpack log data

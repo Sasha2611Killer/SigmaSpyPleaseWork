@@ -637,6 +637,8 @@ local ProcessCallback = newcclosure(function(Data: RemoteData, Remote, ...): tab
     local OriginalFunc = Data.OriginalFunc
     local Id = Data.Id
     local Method = Data.Method
+print("[DBG] ProcessCallback:", Method, "OriginalFunc:", typeof(OriginalFunc))
+										
 
     local RemoteData = Process:GetRemoteData(Id)
     if RemoteData.Blocked then return {} end
@@ -648,6 +650,7 @@ local ProcessCallback = newcclosure(function(Data: RemoteData, Remote, ...): tab
 
     return {
         OriginalFunc(Remote, ...)
+		
     }
 end)
 
@@ -657,7 +660,7 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     local IsReceive = Data.IsReceive
 
 	if TransferType and not self:RemoteAllowed(Remote, TransferType, Method) then return end
-
+print("[DBG] ProcessRemote:", Data.Method, "MetaMethod:", Data.MetaMethod, "IsActor:", Data.IsActor)
     local Id
 	do
 		local identity = getthreadidentity()

@@ -743,6 +743,40 @@ function Process:ProcessRemote(Data: RemoteData, Remote, ...): table?
     local ReturnValues = ProcessCallback(Data, Remote, ...)
     Data.ReturnValues = ReturnValues
 
+	--// [ACTOR FIX] Instance не переживает границу Lua-state через канал.
+	--// Кладём всё, по чему главный VM сможет найти remote сам.
+	if self.ExtraData and self.ExtraData.IsActor then
+		local Path, ClassName, Name
+		pcall(function()
+			Path = Remote:GetFullName()
+			ClassName = Remote.ClassName
+			Name = Remote.Name
+		end)
+
+		Data.IsActor = true
+		Data.RemotePath = (type(Path) == "string" and Path ~= "") and Path or nil
+		Data.RemoteName = Name
+		Data.RemoteClassName = ClassName
+
+		--// Пути скриптов тоже строками — Instance через канал не идёт
+		local function PathOf(Value)
+			if typeof(Value) ~= "Instance" then return nil end
+			local Ok, Full = pcall(function()
+				return Value:GetFullName()
+			end)
+			return (Ok and type(Full) == "string" and Full ~= "") and Full or nil
+		end
+
+		Data.SourceScriptPath = PathOf(Data.SourceScript)
+		Data.CallerScriptPath = PathOf(Data.CallerScript)
+		Data.CallingScriptPath = PathOf(Data.CallingScript)
+
+		--// Функции actor-VM в главном бесполезны и канал их не пропускает
+		Data.OriginalFunc = nil
+		Data.CallingFunction = nil
+		Data.CallerFunction = nil
+	end
+
     Communication:QueueLog(Data)
 
     return ReturnValues

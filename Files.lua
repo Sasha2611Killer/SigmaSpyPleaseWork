@@ -253,14 +253,24 @@ function Files:CompileModule(Scripts): string
 end
 
 function Files:MakeActorScript(Scripts, ChannelId: number): string
-	local ActorCode = Files:CompileModule(Scripts)
+	local Parts = {}
+	for Name, Content in next, Scripts do
+		if typeof(Content) == "string" then
+			Parts[#Parts + 1] = `\t{Name} = (function()\n{Content}\nend)(),`
+		end
+	end
+
+	local ActorCode = "local Libraries = {\n" .. table.concat(Parts, "\n") .. "\n}\n"
 	ActorCode ..= [[
-	local ExtraData = {
-		IsActor = true
-	}
+		local ExtraData = { IsActor = true }
+		local Ok, Err = pcall(function()
+			Libraries.Hook:BeginService(Libraries, ExtraData, CHANNEL_ID)
+		end)
+		if not Ok then
+			warn("[Sigma][Actor] BeginService failed:", Err)
+		end
 	]]
-	ActorCode ..= `Libraries.Hook:BeginService(Libraries, ExtraData, {ChannelId})`
-	return ActorCode
+	return (ActorCode:gsub("CHANNEL_ID", tostring(ChannelId)))
 end
 
 return Files

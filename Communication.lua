@@ -285,101 +285,6 @@ local function GetLimit(Name: string, Default: number): number
     return typeof(Value) == "number" and Value or Default
 end
 
---// [ACTOR FIX] Лог из actor-VM пересекает границу Lua-state.
---// Функции (OriginalFunc/CallingFunction) и треды через канал не проходят:
---// Fire падает целиком, поэтому из актора не доходил НИ ОДИН лог — при этом
---// в консоли спокойно печаталось "Actor connected!" (это просто строка).
---// Args к этому моменту уже сериализованы, чистим только оболочку лога.
-local ChannelSafeTypes = {
-    ["nil"] = true,
-    boolean = true,
-    number = true,
-    string = true,
-    table = true,
-    Instance = true,
-    Enum = true,
-    EnumItem = true,
-    CFrame = true,
-    Vector2 = true,
-    Vector3 = true,
-    Vector2int16 = true,
-    Vector3int16 = true,
-    Color3 = true,
-    ColorSequence = true,
-    ColorSequenceKeypoint = true,
-    NumberSequence = true,
-    NumberSequenceKeypoint = true,
-    NumberRange = true,
-    Rect = true,
-    UDim = true,
-    UDim2 = true,
-    Ray = true,
-    Region3 = true,
-    Region3int16 = true,
-    PhysicalProperties = true,
-    BrickColor = true,
-    TweenInfo = true,
-    Font = true,
-    DateTime = true,
-    PathWaypoint = true,
-    buffer = true,
-    SharedTable = true,
-}
-
-function Module:MakeChannelSafe(Value, Cache)
-    local ValueType = typeof(Value)
-    if not ChannelSafeTypes[ValueType] then
-        --// functions / threads / userdata / signals — через границу VM нельзя
-        return nil, false
-    end
-
-    if ValueType ~= "table" then
-        return Value, true
-    end
-
-    Cache = Cache or {}
-    local Cached = Cache[Value]
-    if Cached then return Cached, true end
-
-    local Copy = {}
-    Cache[Value] = Copy
-
-    for Key, Item in next, Value do
-        local KeyType = typeof(Key)
-        if not ChannelSafeTypes[KeyType] then continue end
-
-        local SafeItem, Keep = self:MakeChannelSafe(Item, Cache)
-        if not Keep then continue end
-
-        local SafeKey = Key
-        if KeyType == "table" then
-            SafeKey = self:MakeChannelSafe(Key, Cache)
-        end
-
-        Copy[SafeKey] = SafeItem
-    end
-
-    return Copy, true
-end
-
---// actor-лог: вырезаем несериализуемое и запоминаем путь ремоута
---// (если Instance всё же не переживёт канал, UI восстановит его по пути)
-function Module:PrepareActorLog(Item)
-    if typeof(Item.Remote) == "Instance" and not Item.RemotePath then
-        local Ok, Path = pcall(function()
-            return Item.Remote:GetFullName()
-        end)
-        Item.RemotePath = Ok and Path or nil
-    end
-
-    local Safe = self:MakeChannelSafe(Item)
-    if type(Safe) ~= "table" then return Item end
-
-    --// IsActor — источник правды для UI; ставим явно, чтобы не потерялся
-    Safe.IsActor = true
-    return Safe
-end
-
 local function FlushBatch(self)
     local MaxPerFrame = GetLimit("MaxLogsPerFrame", 48)
     local Batch, BatchSize = {}, 0
@@ -397,12 +302,6 @@ local function FlushBatch(self)
             local Ok, Serialized = pcall(self.SerializeTable, self, Item.Args)
             if Ok then
                 Item.Args = Serialized
-
-                --// [ACTOR FIX] перед отправкой чистим лог от функций
-                if Item.IsActor then
-                    Item = self:PrepareActorLog(Item)
-                end
-
                 BatchSize += 1
                 Batch[BatchSize] = Item
             end

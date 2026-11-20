@@ -746,16 +746,16 @@ function Hook:HookRemoteTypeIndex(ClassName: string, FuncName: string)
 	local Func = Remote[FuncName]
 	local OriginalFunc
 
-	--// Remotes will share the same functions
-	--// 	For example FireServer will be identical
-	--// Addionally, this is for __index calls.
-	--// 	A __namecall hook will not detect this
 	OriginalFunc = self:HookFunction(Func, function(self, ...)
 		--// Check if the Object is allowed 
 		if not Process:RemoteAllowed(self, "Send", FuncName) then return end
 
-		--// Process the remote data
-		return ProcessRemote(OriginalFunc, "__index", self, FuncName, ...)
+		--// [FIX] ProcessRemote возвращает таблицу — распаковываем,
+		--// иначе InvokeServer получит таблицу вместо значений
+		local ReturnValues = ProcessRemote(OriginalFunc, "__index", self, FuncName, ...)
+		if ReturnValues then
+			return Process:Unpack(ReturnValues)
+		end
 	end)
 end
 

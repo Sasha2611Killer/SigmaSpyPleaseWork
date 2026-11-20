@@ -111,6 +111,12 @@ local TextFont = Font.fromEnum(Enum.Font.Code)
 local FontSuccess = false
 local CommChannel
 
+local ResolvedRemotes = setmetatable({}, {__mode = "v"})
+local RemoteIndex = nil
+local RemoteIndexAt = 0
+
+
+
 function Ui:Init(Data)
     local Modules = Data.Modules
 
@@ -132,6 +138,183 @@ end
 
 function Ui:SetCommChannel(NewCommChannel: BindableEvent)
 	CommChannel = NewCommChannel
+end
+
+function Ui:GetRemoteId(Remote: Instance): string?
+	local HasIdentity = typeof(getthreadidentity) == "function"
+		and typeof(setthreadidentity) == "function"
+
+	local Identity = 2
+	if HasIdentity then
+		local OkId, Value = pcall(getthreadidentity)
+		Identity = OkId and Value or 2
+		pcall(setthreadidentity, 8)
+	end
+
+	local Ok, Id = pcall(function()
+		return Remote.GetDebugId(Remote)
+	end)
+
+	if HasIdentity then
+		pcall(setthreadidentity, Identity)
+	end
+
+	if Ok and type(Id) == "string" then
+		return Id
+	end
+
+	return tostring(Remote):sub(-12)
+end
+
+--// Один проход по дереву + parentless (getnilinstances).
+--// Собираем только классы, которые Spy умеет логировать.
+function Ui:BuildRemoteIndex(): table
+	local Index = {}
+	local RemoteClassData = Process.RemoteClassData
+
+	local function AddList(List)
+		if type(List) ~= "table" then return end
+
+		for _, Item in next, List do
+			if typeof(Item) ~= "Instance" then continue end
+			if not RemoteClassData[Item.ClassName] then continue end
+
+			local Id = self:GetRemoteId(Item)
+			if Id then
+				Index[Id] = Item
+			end
+		end
+	end
+
+	pcall(function()
+		AddList(game:GetDescendants())
+	end)
+
+	if typeof(getnilinstances) == "function" then
+		local Ok, List = pcall(getnilinstances)
+		if Ok then
+			AddList(List)
+		end
+	end
+
+	return Index
+end
+
+--// "ReplicatedStorage.Remotes.Fire" -> Instance
+function Ui:FindByPath(Path: string): Instance?
+	if type(Path) ~= "string" or Path == "" then return end
+
+	local Parts = string.split(Path, ".")
+	local Node = game
+	local Start = (Parts[1] == "game") and 2 or 1
+
+	for Index = Start, #Parts do
+		local Name = Parts[Index]
+		if Name == "" then return end
+
+		local Child = Node:FindFirstChild(Name)
+		if not Child then
+			--// сервисы в GetFullName иногда без "game."
+			local Ok, Service = pcall(function()
+				return game:GetService(Name)
+			end)
+			Child = Ok and Service or nil
+		end
+
+		if not Child then return end
+		Node = Child
+	end
+
+	return Node
+end
+
+--// Главное: получить настоящий Instance для лога из актора.
+function Ui:ResolveRemote(Data): Instance?
+	local Id = Data.Id
+	local Raw = Data.Remote
+
+	local function Cache(Instance): Instance
+		if Id then
+			ResolvedRemotes[Id] = Instance
+		end
+		return Instance
+	end
+
+	--// Лог из главного VM — всё уже на месте
+	if typeof(Raw) == "Instance" then
+		return Cache(Raw)
+	end
+
+	local Known = Id and ResolvedRemotes[Id]
+	if Known then
+		return Known
+	end
+
+	--// Communication мог отдать сериализованный дескриптор инстанса
+	if Communication and typeof(Communication.DeserializeTable) == "function" then
+		--// на всякий случай пробуем и метод, и обычную функцию
+		local Ok, Restored = pcall(Communication.DeserializeTable, Communication, Raw)
+		if not (Ok and typeof(Restored) == "Instance") then
+			Ok, Restored = pcall(Communication.DeserializeTable, Raw)
+		end
+
+		if Ok and typeof(Restored) == "Instance" then
+			return Cache(Restored)
+		end
+	end
+
+	--// Индекс Id -> Instance. Перестраиваем не чаще раза в 5 секунд:
+	--// новые remote появляются редко, а скан дерева не бесплатный.
+	local Now = os.clock()
+	if not RemoteIndex or (Now - RemoteIndexAt) > 5 then
+		RemoteIndex = self:BuildRemoteIndex()
+		RemoteIndexAt = Now
+	end
+
+	local ById = Id and RemoteIndex[Id]
+	if ById then
+		return Cache(ById)
+	end
+
+	--// Fallback 1: путь, который посчитал actor-VM
+	local ByPath = self:FindByPath(Data.RemotePath)
+	if ByPath then
+		return Cache(ByPath)
+	end
+
+	--// Fallback 2: remote вынули из дерева — ищем среди parentless
+	if Data.RemoteName and typeof(getnilinstances) == "function" then
+		local Ok, List = pcall(getnilinstances)
+		if Ok and type(List) == "table" then
+			for _, Item in next, List do
+				if Item.Name ~= Data.RemoteName then continue end
+				if Data.RemoteClassName and Item.ClassName ~= Data.RemoteClassName then continue end
+
+				return Cache(Item)
+			end
+		end
+	end
+
+	return nil
+end
+
+--// Скрипты из actor-VM тоже приходят не инстансами — восстановим по пути
+function Ui:ResolveScripts(Data)
+	local function Pick(Field, PathField)
+		if typeof(Data[Field]) == "Instance" then return end
+
+		local Path = Data[PathField]
+		if type(Path) ~= "string" or Path == "" then return end
+
+		local Found = self:FindByPath(Path)
+		if Found then
+			Data[Field] = Found
+		end
+	end
+
+	Pick("SourceScript", "SourceScriptPath")
+	Pick("CallerScript", "CallerScriptPath")
+	Pick("CallingScript", "CallingScriptPath")
 end
 
 function Ui:CheckScale()
@@ -1600,9 +1783,22 @@ function Ui:QueueLog(Data)
 	--// Guard: логи из actor-VM могут приходить с Remote == nil
 	--// (инстанс не пережил пересечение границы Lua-state через канал).
 	--// attempt to index nil with 'Parent' в CreateLog лечится здесь.
-	if typeof(Data.Remote) ~= "Instance" then
+	local Remote = self:ResolveRemote(Data)
+	if typeof(Remote) ~= "Instance" then
+		self.UnresolvedLogs = (self.UnresolvedLogs or 0) + 1
+
+		--// видимая диагностика вместо тишины
+		if self.UnresolvedLogs == 1 or self.UnresolvedLogs % 50 == 0 then
+			self:ConsoleLog("Log without remote: Id=" .. tostring(Data.Id)
+				.. " path=" .. tostring(Data.RemotePath)
+				.. " dropped=" .. tostring(self.UnresolvedLogs))
+		end
 		return
 	end
+
+		Data.Remote = Remote
+	self:ResolveScripts(Data)	
+			Data.ClassData = Data.ClassData or Process:GetClassData(Remote)
 
 	local Remote = Data.Remote
 	local Id = Data.Id
@@ -1732,6 +1928,9 @@ function Ui:CreateLog(Data: Log)
 	if typeof(Data.Remote) ~= "Instance" then
 		return
 	end
+
+	Data.Remote = Remote
+	self:ResolveScripts(Data)
 
 	--// Unpack log data
     local Remote = Data.Remote

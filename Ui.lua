@@ -1606,11 +1606,7 @@ function Ui:QueueLog(Data)
 	--// Guard: логи из actor-VM могут приходить с Remote == nil
 --// (инстанс не пережил пересечение границы Lua-state через канал).
 --// Пускаем только если есть Id — CreateLog подставит заглушку.
-if typeof(Data.Remote) ~= "Instance" then
-    if not Data.Id then return end
-    --// [FIX] Пропускаем проверки, требующие валидный Remote
-    continue
-end
+   if typeof(Data.Remote) == "Instance" or Data.Id then end
 
 			
 

@@ -855,6 +855,11 @@ function Hook:BeginHooks()
 		end)
 	end
 
+	--// [КРИТИЧНО] Хукаем FireServer/InvokeServer для конкретных классов.
+	--// Без этого OriginalFunc в ProcessRemote = nil, и движок получает
+	--// nil вместо результата вызова — ломается камера и всё остальное.
+	self:HookRemoteIndexes()
+
 	Merge(self, {
 		OriginalNamecall = OriginalNameCall,
 	})

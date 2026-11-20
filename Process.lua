@@ -731,7 +731,7 @@ print("[DBG] ProcessRemote:", Data.Method, "MetaMethod:", Data.MetaMethod, "IsAc
 
     local CallingScript = getcallingscript()
     self:Merge(Data, {
-        Remote = cloneref(Remote),
+        Remote = (self.ExtraData and self.ExtraData.IsActor) and Remote or cloneref(Remote),
 		CallingScript = CallingScript,
         CallingFunction = CallingFunction,
         --// Fallback: если стек пуст — getcallingscript() (владелец потока)

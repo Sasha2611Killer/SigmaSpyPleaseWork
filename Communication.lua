@@ -299,39 +299,31 @@ local function FlushBatch(self)
             local Pending = (PendingById[Id] or 1) - 1
             PendingById[Id] = if Pending > 0 then Pending else nil
 
-            --// [FIX] Remote тоже сериализуем — инстансы из actor-state
-            --// не переживают BindableEvent:Fire без явной сериализации
-            local RemoteOk, RemoteSerialized = pcall(function()
-                if typeof(Item.Remote) == "Instance" then
-                    return {
-                        __RemoteInstance = true,
-                        Name = Item.Remote.Name,
-                        ClassName = Item.Remote.ClassName,
-                        DebugId = (function()
-                            local ok, id = pcall(function()
-                                return Item.Remote:GetDebugId()
-                            end)
-                            return ok and id or "unknown"
-                        end)(),
-                    }
-                end
-                return Item.Remote
-            end)
-            
-            if RemoteOk then
-                Item.Remote = RemoteSerialized
-            end
-
             local Ok, Serialized = pcall(self.SerializeTable, self, Item.Args)
             if Ok then
                 Item.Args = Serialized
                 BatchSize += 1
                 Batch[BatchSize] = Item
             end
+            --// Один битый лог не должен убить весь батч — просто пропускаем
         end
     end
 
-     --// Батч уже скопирован каналом (BindableEvent), ссылки не держим
+    --// Очередь опустела — обнуляем указатели (как у Cobalt)
+    if LogQueueHead > LogQueueTail then
+        LogQueue = {}
+        LogQueueHead, LogQueueTail = 1, 0
+    end
+
+    if BatchSize <= 0 then return end
+
+    local Ok, Err = pcall(self.Communicate, self, "QueueLog", Batch)
+    if not Ok then
+        -- не warn: строка ошибки может содержать имена функций из списка АС
+        self:ConsolePrint("QueueLog error:", tostring(Err):sub(1, 120))
+    end
+
+    --// Батч уже скопирован каналом (BindableEvent), ссылки не держим
     table.clear(Batch)
 end
 

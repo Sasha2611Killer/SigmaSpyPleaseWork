@@ -730,18 +730,19 @@ print("[DBG] ProcessRemote:", Data.Method, "MetaMethod:", Data.MetaMethod, "IsAc
     end
 
     local CallingScript = getcallingscript()
-    self:Merge(Data, {
-        Remote = (self.ExtraData and self.ExtraData.IsActor) and Remote or cloneref(Remote),
+   local IsActorCall = self.ExtraData and self.ExtraData.IsActor
+	self:Merge(Data, {
+		Remote = IsActorCall and Remote or cloneref(Remote),
 		CallingScript = CallingScript,
-        CallingFunction = CallingFunction,
-        --// Fallback: если стек пуст — getcallingscript() (владелец потока)
-        SourceScript = SourceScript or CallingScript,
-        CallerScript = CallerScript,
-        Id = Id,
+		CallingFunction = CallingFunction,
+		SourceScript = SourceScript or CallingScript,
+		CallerScript = CallerScript,
+		Id = Id,
 		ClassData = ClassData,
-        Timestamp = Timestamp,
-        Args = {...}
-    })
+		Timestamp = Timestamp,
+		Args = {...}
+	})
+
 
     local ReturnValues = ProcessCallback(Data, Remote, ...)
 	Data.ReturnValues = ReturnValues

@@ -1720,51 +1720,22 @@ function Ui:FilterName(Name: string, CharacterLimit: number?): string
 end
 
 function Ui:CreateLog(Data: Log)
-	--// [FIX] Восстанавливаем Remote из сериализованной таблицы (actor-логи)
-	if type(Data.Remote) == "table" and Data.Remote.__RemoteInstance then
-		local DebugId = Data.Remote.DebugId
-		local Name = Data.Remote.Name or "Remote"
-		local ClassName = Data.Remote.ClassName or "RemoteEvent"
-		local Found = nil
-		
-		--// Ищем инстанс по DebugId в main-state (только для actor-логов)
-		local SearchOk = pcall(function()
-			for _, Remote in next, game:GetDescendants() do
-				if typeof(Remote) == "Instance" and Remote.Name == Name then
-					local ok, id = pcall(function()
-						return Remote:GetDebugId()
-					end)
-					if ok and id == DebugId then
-						Found = Remote
-						break
-					end
-				end
-			end
-		end)
-		
-		if Found then
-			Data.Remote = cloneref(Found)
-		else
-			--// Не нашли — заглушка с метаданными
-			Data.Remote = setmetatable({
-				Name = Name,
-				ClassName = ClassName,
-			}, {
-				__tostring = function() return Name end,
-				__index = function(_, key)
-					if key == "GetDebugId" then return function() return DebugId end end
-					if key == "Parent" then return game:GetService("ReplicatedStorage") end
-					if key == "Name" then return Name end
-					if key == "ClassName" then return ClassName end
-					return nil
-				end,
-			})
-		end
-	end
-
-	--// Guard: если Remote всё ещё не валиден — пропускаем
-	if typeof(Data.Remote) ~= "Instance" and type(Data.Remote) ~= "table" then
-		return
+	--// [FIX] Actor-логи без валидного remote — подставляем заглушку.
+	--// Обычно не сработает, т.к. патч ProcessRemote передаёт сырой инстанс,
+	--// но на случай отказа маршалинга — не падаем.
+	if typeof(Data.Remote) ~= "Instance" then
+		local Id = Data.Id or "unknown"
+		Data.Remote = setmetatable({
+			Name = "RemoteFunction",
+			ClassName = "RemoteFunction",
+		}, {
+			__tostring = function() return "RemoteFunction" end,
+			__index = function(_, key)
+				if key == "GetDebugId" then return function() return Id end end
+				if key == "Parent" then return game:GetService("ReplicatedStorage") end
+				return nil
+			end,
+		})
 	end
 
 	--// Unpack log data
@@ -1776,10 +1747,7 @@ function Ui:CreateLog(Data: Log)
 	local Timestamp = Data.Timestamp
 	local IsExploit = Data.IsExploit
 	
-	local IsNilParent = false
-	if typeof(Remote) == "Instance" then
-		IsNilParent = Hook:Index(Remote, "Parent") == nil
-	end
+	local IsNilParent = Hook:Index(Remote, "Parent") == nil
 	local RemoteData = Process:GetRemoteData(Id)
 
 	--// Paused

@@ -1596,44 +1596,28 @@ function Ui:QueueLog(Data)
 		end
 		return
 	end
-			
-	local HasValidRemote = typeof(Data.Remote) == "Instance"
-	if not HasValidRemote and not Data.Id then
-		return
-	end
-	print("[DBG] QueueLog:", Data.Method, "IsActor:", Data.IsActor, "Remote:", typeof(Data.Remote))
 
-	--// Guard: логи из actor-VM могут приходить с Remote == nil
---// (инстанс не пережил пересечение границы Lua-state через канал).
---// Пускаем только если есть Id — CreateLog подставит заглушку.
-   if typeof(Data.Remote) == "Instance" or Data.Id then end
+	--// [FIX] Actor-логи: Remote может быть nil на входе (инстанс не
+	--// пережил границу Lua-state), но Id есть — пускаем дальше.
+	--// CreateLog подставит заглушку, если нужно.
+	if not Data.Id then return end
 
-			
-
-	local Remote = Data.Remote
-	local Id = Data.Id
-	local Method = Data.Method
-
-	--// [OPT] Дешёвые фильтры ДО тяжёлых копий аргументов. Раньше Paused /
-	--// LogRecives / Excluded отсекались только в CreateLog — то есть после
-	--// десериализации и двух DeepClone на КАЖДЫЙ вызов спамера.
+	--// [OPT] Дешёвые фильтры ДО тяжёлых копий аргументов
 	if Flags:GetFlagValue("Paused") then return end
 	if Data.IsReceive and not Flags:GetFlagValue("LogRecives") then return end
-	if Data.IsExploit and not Flags:GetFlagValue("LogExploit") then return end
+	if Data.IsExploit and not Data.IsActor and not Flags:GetFlagValue("LogExploit") then return end
 
-	if HasValidRemote then
+	--// [FIX] Проверки, требующие валидный Remote — только если он есть
+	if typeof(Data.Remote) == "Instance" then
 		if Flags:GetFlagValue("IgnoreNil") and Hook:Index(Data.Remote, "Parent") == nil then
 			return
 		end
 	end
-	
 
-	if Process:GetRemoteData(Id).Excluded then return end
+	if Process:GetRemoteData(Data.Id).Excluded then return end
 
 	--// [OPT] Ранний дедуп (IgnoreDuplicates): сравниваем СЫРЫЕ
 	--// сериализованные аргументы до десериализации/DeepClone/UI.
-	--// Спамные вызовы умирают сразу на входе. Ключ — Id ремоута,
-	--// хранение по методам (пинг-понг send/receive не пропускает).
 	if Flags:GetFlagValue("IgnoreDuplicates") then
 		local Store = self.DedupStore
 		if not Store then
@@ -1641,28 +1625,27 @@ function Ui:QueueLog(Data)
 			self.DedupStore = Store
 		end
 
-		local ById = Store[Id]
+		local ById = Store[Data.Id]
 		if not ById then
 			ById = {}
-			Store[Id] = ById
+			Store[Data.Id] = ById
 		end
 
-		if Process:DeepEquals(Data.Args, ById[Method]) then
+		if Process:DeepEquals(Data.Args, ById[Data.Method]) then
 			return
 		end
-		ById[Method] = Data.Args
+		ById[Data.Method] = Data.Args
 	end
 
 	--// [FIX] Per-remote лимит ожидающих. Флуд одного remote упирается
 	--// в собственный счётчик и НЕ вытесняет логи остальных remote.
-	--// Аналог cobalt'овского Log:IsOverSpamThreshold.
 	local Pending = self.PendingByRemote
-	local Count = Pending[Id] or 0
+	local Count = Pending[Data.Id] or 0
 	if Count >= self.MaxPendingPerRemote then
-		self.DroppedByRemote[Id] = (self.DroppedByRemote[Id] or 0) + 1
+		self.DroppedByRemote[Data.Id] = (self.DroppedByRemote[Data.Id] or 0) + 1
 		return
 	end
-	Pending[Id] = Count + 1
+	Pending[Data.Id] = Count + 1
 
 	--// Args оставляем сериализованными: свежую таблицу всё равно создаёт
 	--// DeserializeTable в CreateLog. Лишний DeepClone на каждый лог убран.
@@ -1737,17 +1720,19 @@ function Ui:FilterName(Name: string, CharacterLimit: number?): string
 end
 
 function Ui:CreateLog(Data: Log)
-	--// Guard: дропаем логи без валидного remote (см. QueueLog)
+	--// [FIX] Actor-логи без валидного remote — подставляем заглушку.
+	--// Обычно не сработает, т.к. патч ProcessRemote передаёт сырой инстанс,
+	--// но на случай отказа маршалинга — не падаем.
 	if typeof(Data.Remote) ~= "Instance" then
 		local Id = Data.Id or "unknown"
 		Data.Remote = setmetatable({
-			Name = `[Actor ${Data.Method or "Remote"}]`,
-			ClassName = "Instance",
+			Name = "RemoteFunction",
+			ClassName = "RemoteFunction",
 		}, {
-			__tostring = function() return `[Actor ${Id}]` end,
+			__tostring = function() return "RemoteFunction" end,
 			__index = function(_, key)
 				if key == "GetDebugId" then return function() return Id end end
-				if key == "Parent" then return nil end
+				if key == "Parent" then return game:GetService("ReplicatedStorage") end
 				return nil
 			end,
 		})
@@ -1770,8 +1755,9 @@ function Ui:CreateLog(Data: Log)
 	if Paused then return end
 
 	--// Check caller (Ignore exploit calls)
+	--// [FIX] Actor-вызовы НЕ считаем exploit — они из игрового контекста
 	local LogExploit = Flags:GetFlagValue("LogExploit")
-	if not LogExploit and IsExploit then return end
+	if not LogExploit and IsExploit and not Data.IsActor then return end
 
 	--// IgnoreNil
 	local IgnoreNil = Flags:GetFlagValue("IgnoreNil")

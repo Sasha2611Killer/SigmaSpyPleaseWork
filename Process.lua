@@ -671,7 +671,9 @@ print("[DBG] ProcessRemote:", Data.Method, "MetaMethod:", Data.MetaMethod, "IsAc
 		setthreadidentity(identity)
 		Id = (OkDid and Did) or tostring(Remote):sub(-12)
 	end
-    local ClassData = self:GetClassData(Remote)
+									
+    local ClassName = Hook:Index(Remote, "ClassName")
+    local ClassData = self.RemoteClassData[ClassName]
     local Timestamp = tick()
 	print("[DBG]", Remote.ClassName, "IsRemoteFunction =", ClassData and ClassData.IsRemoteFunction)
 

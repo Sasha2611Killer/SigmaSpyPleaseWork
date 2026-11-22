@@ -1776,6 +1776,10 @@ end
 
 	local SelectNewest = Flags:GetFlagValue("SelectNewest")
 	local NoTreeNodes = Flags:GetFlagValue("NoTreeNodes")
+	print("[DBG][UI]",
+    "IsActor =", Data.IsActor,
+    "| typeof(Remote) =", typeof(Data.Remote),
+    "| ref =", typeof(Process:GetRemoteRef(Data.Id)))
 
     --// Excluded check
     if RemoteData.Excluded then return end

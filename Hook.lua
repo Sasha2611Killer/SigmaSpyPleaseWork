@@ -762,6 +762,10 @@ end
 function Hook:HookRemoteIndexes()
 	local RemoteClassData = Process.RemoteClassData
 	for ClassName, Data in RemoteClassData do
+		if ClassName == "BindableEvent" or ClassName == "BindableFunction" then
+			continue
+		end
+		
 		local FuncName = Data.Send[1]
 		--// [FIX] Для RemoteFunction пробуем оба варианта:
 		--// InvokeServer через __index может не дать функцию в некоторых VM

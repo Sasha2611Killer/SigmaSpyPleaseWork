@@ -671,6 +671,7 @@ print("[DBG] ProcessRemote:", Data.Method, "MetaMethod:", Data.MetaMethod, "IsAc
 	end
     local ClassData = self:GetClassData(Remote)
     local Timestamp = tick()
+	print("[DBG]", Remote.ClassName, "IsRemoteFunction =", ClassData and ClassData.IsRemoteFunction)
 
     if IsReceive then
         local RemoteData = self:GetRemoteData(Id)
@@ -733,6 +734,7 @@ print("[DBG] ProcessRemote:", Data.Method, "MetaMethod:", Data.MetaMethod, "IsAc
    local IsActorCall = self.ExtraData and self.ExtraData.IsActor
 	self:Merge(Data, {
 		Remote = IsActorCall and Remote or cloneref(Remote),
+		ClassName = ClassName,
 		CallingScript = CallingScript,
 		CallingFunction = CallingFunction,
 		SourceScript = SourceScript or CallingScript,

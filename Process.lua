@@ -63,7 +63,6 @@ local Process = {
             }
         },
         ["BindableFunction"] = {
-            IsRemoteFunction = true,
             NoReciveHook = true,
             Send = {
                 "Invoke",

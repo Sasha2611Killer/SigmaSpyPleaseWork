@@ -635,6 +635,18 @@ function Process:PromptDiscordInvite(InviteCode: string)
     })
 end
 
+function Process:GetClassInfo(Remote: Instance): (string?, table?)
+    if typeof(Remote) ~= "Instance" then return nil, nil end
+
+    local ClassName = Hook:Index(Remote, "ClassName")
+    return ClassName, self.RemoteClassData[ClassName]
+end
+
+function Process:GetClassData(Remote: Instance): table?
+    local _, ClassData = self:GetClassInfo(Remote)
+    return ClassData
+end
+
 local ProcessCallback = newcclosure(function(Data: RemoteData, Remote, ...): table?
 	local OriginalFunc = Data.OriginalFunc
 	local Id = Data.Id
@@ -672,9 +684,10 @@ print("[DBG] ProcessRemote:", Data.Method, "MetaMethod:", Data.MetaMethod, "IsAc
 		Id = (OkDid and Did) or tostring(Remote):sub(-12)
 	end
 									
-    local ClassName = Hook:Index(Remote, "ClassName")
-    local ClassData = self.RemoteClassData[ClassName]
+    local ClassName, ClassData = self:GetClassInfo(Remote)
+
     local Timestamp = tick()
+									
 	print("[DBG]", Remote.ClassName, "IsRemoteFunction =", ClassData and ClassData.IsRemoteFunction)
 
     if IsReceive then

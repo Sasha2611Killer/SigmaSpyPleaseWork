@@ -54,7 +54,6 @@ local Process = {
         },
         ["BindableEvent"] = {
 			IsBindable = true,
-            NoReciveHook = true,
             Send = {
                 "Fire",
 				"fire",
@@ -66,7 +65,6 @@ local Process = {
         ["BindableFunction"] = {
 			IsBindable = true,
 			IsRemoteFunction = true,
-            NoReciveHook = true,
             Send = {
                 "Invoke",
 				"invoke",

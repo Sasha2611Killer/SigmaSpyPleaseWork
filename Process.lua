@@ -691,11 +691,8 @@ print("[DBG] ProcessRemote:", Data.Method, "MetaMethod:", Data.MetaMethod, "IsAc
 	self.RemoteRefs[Id] = Remote
 									
     local ClassName, ClassData = self:GetClassInfo(Remote)
-
     local Timestamp = tick()
 									
-	print("[DBG]", Remote.ClassName, "IsRemoteFunction =", ClassData and ClassData.IsRemoteFunction)
-
     if IsReceive then
         local RemoteData = self:GetRemoteData(Id)
         if RemoteData.Blocked then

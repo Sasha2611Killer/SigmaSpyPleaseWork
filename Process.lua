@@ -85,7 +85,8 @@ local Process = {
         [{"sirhurt", "potassium", "wave"}] = {
             ForceUseCustomComm = true
         }
-    }
+    },
+	RemoteRefs = setmetatable({}, {__mode = "v"})
 }
 
 --// Modules
@@ -155,6 +156,10 @@ function Process:CheckConfig(Config: table)
     if not Overwrites then return end
 
     self:Merge(Config, Overwrites)
+end
+
+function Process:GetRemoteRef(Id: string)
+    return self.RemoteRefs[Id]
 end
 
 function Process:CleanCError(Error: string): string
@@ -683,6 +688,7 @@ print("[DBG] ProcessRemote:", Data.Method, "MetaMethod:", Data.MetaMethod, "IsAc
 		setthreadidentity(identity)
 		Id = (OkDid and Did) or tostring(Remote):sub(-12)
 	end
+	self.RemoteRefs[Id] = Remote
 									
     local ClassName, ClassData = self:GetClassInfo(Remote)
 
@@ -752,6 +758,7 @@ print("[DBG] ProcessRemote:", Data.Method, "MetaMethod:", Data.MetaMethod, "IsAc
 	self:Merge(Data, {
 		Remote = IsActorCall and Remote or cloneref(Remote),
 		ClassName = ClassName,
+		RemoteName = Hook:Index(Remote, "Name"),
 		CallingScript = CallingScript,
 		CallingFunction = CallingFunction,
 		SourceScript = SourceScript or CallingScript,

@@ -1724,19 +1724,26 @@ function Ui:CreateLog(Data: Log)
 	--// Обычно не сработает, т.к. патч ProcessRemote передаёт сырой инстанс,
 	--// но на случай отказа маршалинга — не падаем.
 	if typeof(Data.Remote) ~= "Instance" then
-		local Id = Data.Id or "unknown"
-		Data.Remote = setmetatable({
-			Name = "RemoteFunction",
-			ClassName = "RemoteFunction",
-		}, {
-			__tostring = function() return "RemoteFunction" end,
-			__index = function(_, key)
-				if key == "GetDebugId" then return function() return Id end end
-				if key == "Parent" then return game:GetService("ReplicatedStorage") end
-				return nil
-			end,
-		})
-	end
+    Data.Remote = Process:GetRemoteRef(Data.Id)
+end
+
+if typeof(Data.Remote) ~= "Instance" then
+    local Id = Data.Id or "unknown"
+    local Name = Data.RemoteName or "Remote"
+    local ClassName = Data.ClassName or "RemoteEvent"
+
+    Data.Remote = setmetatable({
+        Name = Name,
+        ClassName = ClassName,
+    }, {
+        __tostring = function() return Name end,
+        __index = function(_, Key)
+            if Key == "GetDebugId" then return function() return Id end end
+            if Key == "Parent" then return game:GetService("ReplicatedStorage") end
+            return nil
+        end,
+    })
+end
 
 	--// Unpack log data
     local Remote = Data.Remote
